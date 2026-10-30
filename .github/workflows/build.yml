@@ -34,7 +34,14 @@ jobs:
           if [ -n "$ENG" ] && [ -f "$ENG" ]; then
             echo "Engine file: $ENG"
             cp "$ENG" www/engine.js
-            sed -i 's#<head>#<head><script src="engine.js"></script>#' www/index.html
+            if [ "$(grep -c '^<script>$' www/index.html)" -ge 2 ]; then
+              awk 'BEGIN{n=0} /^<script>$/{n++; if(n==2) print "<script src=\"engine.js\"></script>"} {print}' www/index.html > www/index.tmp
+              mv www/index.tmp www/index.html
+              echo "Engine added before the main script"
+            else
+              sed -i 's#<head>#<head><script src="engine.js"></script>#' www/index.html
+              echo "Engine added in head"
+            fi
           else
             echo "No engine.js found, building without it"
           fi

@@ -248,130 +248,163 @@ jobs:
           import com.getcapacitor.PluginMethod;
           import com.getcapacitor.annotation.CapacitorPlugin;
           import java.io.File;
-          import java.util.concurrent.TimeUnit;
 
           @CapacitorPlugin(name = "VEngine")
           public class VEnginePlugin extends Plugin {
+
+            static VEnginePlugin instance;
+            static boolean backReady = false;
+
             private ExoPlayer player;
             private FrameLayout box;
-            private TextureView texture;
-            private final Handler h = new Handler(Looper.getMainLooper());
-            private String curId = "";
-            private int vw = 0, vh = 0;
-            private boolean cover = false, muted = false;
+            private TextureView tv;
+            private int vw = 0;
+            private int vh = 0;
+            private int curId = 0;
+            private boolean cover = false;
             private float vol = 1f;
+            private boolean muted = false;
+            private final Handler h = new Handler(Looper.getMainLooper());
+            private final Runnable tick = new Runnable() {
+              @Override
+              public void run() {
+                sendState();
+                if (player != null) h.postDelayed(this, 250);
+              }
+            };
+
+            @Override
+            public void load() {
+              instance = this;
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  try {
+                    getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                  } catch (Exception e) {
+                  }
+                }
+              });
+            }
+
+            static void installBack(final ComponentActivity a) {
+              a.getOnBackPressedDispatcher().addCallback(a, new OnBackPressedCallback(true) {
+                @Override
+                public void handleOnBackPressed() {
+                  VEnginePlugin p = instance;
+                  if (p != null && backReady) {
+                    p.notifyListeners("back", new JSObject());
+                  } else {
+                    a.finish();
+                  }
+                }
+              });
+            }
 
             private void ensure() {
               if (player != null) return;
               Context ctx = getContext();
-              box = new FrameLayout(ctx);
-              box.setBackgroundColor(Color.BLACK);
-              texture = new TextureView(ctx);
-              box.addView(texture, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
-              ));
-              getActivity().addContentView(box, new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-              ));
-              box.setVisibility(View.GONE);
-
-              DefaultRenderersFactory rf = new DefaultRenderersFactory(ctx);
-              rf.setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER);
-              DefaultLoadControl lc = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(1500, 50000, 500, 1000)
-                .build();
-
-              player = new ExoPlayer.Builder(ctx, rf)
-                .setLoadControl(lc)
-                .build();
-              player.setVideoTextureView(texture);
+              DefaultRenderersFactory rf = new DefaultRenderersFactory(ctx).setEnableDecoderFallback(true);
+              DefaultLoadControl lc = new DefaultLoadControl.Builder().setBufferDurationsMs(2000, 10000, 250, 500).build();
+              player = new ExoPlayer.Builder(ctx, rf).setLoadControl(lc).build();
+              player.setRepeatMode(Player.REPEAT_MODE_ONE);
               player.setAudioAttributes(
-                new AudioAttributes.Builder()
-                  .setUsage(C.USAGE_MEDIA)
-                  .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                  .build(),
+                new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
                 true
               );
               player.addListener(new Player.Listener() {
                 @Override
-                public void onVideoSizeChanged(VideoSize s) {
-                  vw = s.width;
-                  vh = s.height;
+                public void onVideoSizeChanged(VideoSize size) {
+                  vw = size.width;
+                  vh = size.height;
                   fit();
                 }
 
                 @Override
-                public void onPlayerError(PlaybackException e) {
-                  notifyListeners("error", new JSObject().put("message", e.getMessage()));
+                public void onRenderedFirstFrame() {
+                  JSObject o = new JSObject();
+                  o.put("id", curId);
+                  notifyListeners("first", o);
                 }
 
                 @Override
-                public void onPlaybackStateChanged(int state) {
-                  notifyListeners("state", new JSObject().put("state", state));
+                public void onPlayerError(PlaybackException e) {
+                  JSObject o = new JSObject();
+                  o.put("id", curId);
+                  o.put("msg", e.getErrorCodeName());
+                  notifyListeners("error", o);
                 }
               });
+              box = new FrameLayout(ctx);
+              box.setBackgroundColor(Color.BLACK);
+              box.setVisibility(View.GONE);
+              tv = new TextureView(ctx);
+              box.addView(tv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+              ViewGroup parent = (ViewGroup) getBridge().getWebView().getParent();
+              parent.addView(box, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+              box.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override
+                public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int orr, int ob) {
+                  fit();
+                }
+              });
+              player.setVideoTextureView(tv);
             }
 
             private void fit() {
-              if (texture == null || vw <= 0 || vh <= 0) return;
-              texture.post(() -> {
-                int w = box.getWidth(), h = box.getHeight();
-                if (w <= 0 || h <= 0) return;
-                float sx = (float) w / vw;
-                float sy = (float) h / vh;
-                float scale = cover ? Math.max(sx, sy) : Math.min(sx, sy);
-                android.graphics.Matrix m = new android.graphics.Matrix();
-                m.setScale(vw * scale / w, vh * scale / h, w / 2f, h / 2f);
-                texture.setTransform(m);
-              });
+              if (box == null || tv == null) return;
+              int bw = box.getWidth();
+              int bh = box.getHeight();
+              if (bw == 0 || bh == 0 || vw == 0 || vh == 0) return;
+              float sx = (float) bw / vw;
+              float sy = (float) bh / vh;
+              float s = cover ? Math.max(sx, sy) : Math.min(sx, sy);
+              tv.setLayoutParams(new FrameLayout.LayoutParams(Math.round(vw * s), Math.round(vh * s), Gravity.CENTER));
             }
 
             private void applyVolume() {
-              if (player != null) player.setVolume(muted ? 0f : Math.max(0f, Math.min(1f, vol)));
+              if (player != null) player.setVolume(muted ? 0f : vol);
             }
 
-            private final Runnable tick = new Runnable() {
-              @Override
-              public void run() {
-                if (player != null) {
-                  JSObject r = new JSObject();
-                  r.put("id", curId);
-                  r.put("position", player.getCurrentPosition());
-                  r.put("duration", player.getDuration());
-                  r.put("playing", player.isPlaying());
-                  notifyListeners("time", r);
-                  h.postDelayed(this, 500);
-                }
-              }
-            };
+            private void sendState() {
+              if (player == null) return;
+              JSObject o = new JSObject();
+              o.put("id", curId);
+              o.put("pos", player.getCurrentPosition());
+              long d = player.getDuration();
+              o.put("dur", d == C.TIME_UNSET ? -1 : d);
+              o.put("playing", player.isPlaying());
+              o.put("w", vw);
+              o.put("h", vh);
+              notifyListeners("state", o);
+            }
 
-            public static void installBack(ComponentActivity activity) {
-              activity.getOnBackPressedDispatcher().addCallback(
-                activity,
-                new OnBackPressedCallback(true) {
-                  @Override
-                  public void handleOnBackPressed() {
-                    setEnabled(false);
-                    activity.getOnBackPressedDispatcher().onBackPressed();
-                  }
-                }
-              );
+            @PluginMethod
+            public void setBackReady(PluginCall call) {
+              backReady = true;
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void exit(PluginCall call) {
+              call.resolve();
+              getActivity().finish();
             }
 
             @PluginMethod
             public void open(final PluginCall call) {
-              final String path = call.getString("path", "");
-              final String id = call.getString("id", "");
+              final String path = call.getString("path");
+              if (path == null) {
+                call.reject("no path");
+                return;
+              }
+              final int id = call.getInt("id", 0);
               final boolean play = call.getBoolean("play", true);
-              final double pos = call.getDouble("position", 0.0);
-              final float rate = call.getFloat("rate", 1f);
               final boolean mute = call.getBoolean("muted", false);
+              final double pos = call.getDouble("pos", 0.0);
+              final float rate = call.getFloat("rate", 1f);
               final float v = call.getFloat("vol", 1f);
               final String fitMode = call.getString("fit", "contain");
-
               getActivity().runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
@@ -543,13 +576,14 @@ jobs:
               if "Theme.SplashScreen" in s and "windowSplashScreenBackground" not in s:
                   s = s.replace('parent="Theme.SplashScreen">', 'parent="Theme.SplashScreen">\n        <item name="windowSplashScreenBackground">@color/vp_splash_bg</item>')
               if s != o:
-                  shutil.copy(f, f + ".bak")
+                  bak = "/tmp/" + os.path.basename(os.path.dirname(f)) + "_styles.bak"
+                  shutil.copy(f, bak)
                   open(f, "w", encoding="utf-8").write(s)
                   try:
                       minidom.parse(f)
                       print("updated", f)
                   except Exception as e:
-                      shutil.copy(f + ".bak", f)
+                      shutil.copy(bak, f)
                       print("reverted", f, e)
           EOF
           python3 fix_start.py

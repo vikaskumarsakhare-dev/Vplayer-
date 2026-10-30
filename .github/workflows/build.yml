@@ -8,6 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -23,7 +25,10 @@ jobs:
           npm init -y
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
           mkdir -p www
-          cp index.html www/index.html
+          HTML=$(git log -1 --name-only --diff-filter=AM --format= -- 'index*.html' | head -1)
+          if [ -z "$HTML" ] || [ ! -f "$HTML" ]; then HTML=$(ls -1 index*.html | head -1); fi
+          echo "Using $HTML"
+          cp "$HTML" www/index.html
           cat > capacitor.config.json <<'EOF'
           {
             "appId": "com.vplayer.app",
@@ -41,10 +46,14 @@ jobs:
           cat > $DIR/MediaScanPlugin.java <<'EOF'
           package com.vplayer.app;
 
+          import android.content.Context;
           import android.database.Cursor;
+          import android.media.AudioManager;
           import android.net.Uri;
           import android.os.Build;
           import android.provider.MediaStore;
+          import android.provider.Settings;
+          import android.view.WindowManager;
           import com.getcapacitor.JSArray;
           import com.getcapacitor.JSObject;
           import com.getcapacitor.PermissionState;
@@ -104,6 +113,51 @@ jobs:
               call.resolve(r);
             }
 
+            @PluginMethod
+            public void setBrightness(PluginCall call) {
+              final float v = call.getFloat("value", -1f);
+              getActivity().runOnUiThread(() -> {
+                WindowManager.LayoutParams lp = getActivity().getWindow().getAttributes();
+                lp.screenBrightness = v < 0 ? WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE : Math.max(0.02f, Math.min(1f, v));
+                getActivity().getWindow().setAttributes(lp);
+              });
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void getBrightness(PluginCall call) {
+              float b = getActivity().getWindow().getAttributes().screenBrightness;
+              if (b < 0) {
+                try {
+                  b = Settings.System.getInt(getContext().getContentResolver(), Settings.System.SCREEN_BRIGHTNESS) / 255f;
+                } catch (Exception e) {
+                  b = 0.5f;
+                }
+              }
+              JSObject r = new JSObject();
+              r.put("value", (double) b);
+              call.resolve(r);
+            }
+
+            @PluginMethod
+            public void setVolume(PluginCall call) {
+              AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+              int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+              float v = call.getFloat("value", 0.5f);
+              am.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(Math.max(0f, Math.min(1f, v)) * max), 0);
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void getVolume(PluginCall call) {
+              AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+              int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+              int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+              JSObject r = new JSObject();
+              r.put("value", max > 0 ? (double) cur / max : 0.5);
+              call.resolve(r);
+            }
+
             private void query(Uri uri, String kind, JSArray out) {
               boolean video = kind.equals("video");
               String[] cols = video
@@ -149,6 +203,50 @@ jobs:
           EOF
           M=android/app/src/main/AndroidManifest.xml
           sed -i 's#</manifest>#    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n</manifest>#' $M
+
+      - name: Make app icon
+        continue-on-error: true
+        run: |
+          python3 -m pip install --quiet pillow
+          cat > make_icon.py <<'EOF'
+          import os
+          from PIL import Image, ImageDraw
+          res = "android/app/src/main/res"
+          YEL = (255, 181, 46, 255)
+          INK = (26, 18, 4, 255)
+
+          def legacy(size, round_shape):
+              img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+              d = ImageDraw.Draw(img)
+              if round_shape:
+                  d.ellipse([0, 0, size - 1, size - 1], fill=YEL)
+              else:
+                  d.rounded_rectangle([0, 0, size - 1, size - 1], radius=size * 0.22, fill=YEL)
+              d.polygon([(size * 0.30, size * 0.32), (size * 0.70, size * 0.32), (size * 0.50, size * 0.70)], fill=INK)
+              return img
+
+          def foreground(size):
+              img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+              d = ImageDraw.Draw(img)
+              d.polygon([(size * 0.33, size * 0.35), (size * 0.67, size * 0.35), (size * 0.50, size * 0.66)], fill=INK)
+              return img
+
+          for name, small, big in [("mdpi", 48, 108), ("hdpi", 72, 162), ("xhdpi", 96, 216), ("xxhdpi", 144, 324), ("xxxhdpi", 192, 432)]:
+              folder = os.path.join(res, "mipmap-" + name)
+              os.makedirs(folder, exist_ok=True)
+              legacy(small, False).save(os.path.join(folder, "ic_launcher.png"))
+              legacy(small, True).save(os.path.join(folder, "ic_launcher_round.png"))
+              foreground(big).save(os.path.join(folder, "ic_launcher_foreground.png"))
+
+          os.makedirs(os.path.join(res, "mipmap-anydpi-v26"), exist_ok=True)
+          os.makedirs(os.path.join(res, "values"), exist_ok=True)
+          xml = '<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n    <background android:drawable="@color/vp_icon_bg"/>\n    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n</adaptive-icon>\n'
+          for n in ["ic_launcher.xml", "ic_launcher_round.xml"]:
+              open(os.path.join(res, "mipmap-anydpi-v26", n), "w").write(xml)
+          open(os.path.join(res, "values", "vp_colors.xml"), "w").write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="vp_icon_bg">#FFB52E</color>\n</resources>\n')
+          print("icon files written")
+          EOF
+          python3 make_icon.py
 
       - name: Build APK
         run: |

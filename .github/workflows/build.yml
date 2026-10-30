@@ -380,6 +380,14 @@ jobs:
             }
 
             @PluginMethod
+            public void ping(PluginCall call) {
+              JSObject o = new JSObject();
+              o.put("ok", true);
+              o.put("sdk", android.os.Build.VERSION.SDK_INT);
+              call.resolve(o);
+            }
+
+            @PluginMethod
             public void setBackReady(PluginCall call) {
               backReady = true;
               call.resolve();

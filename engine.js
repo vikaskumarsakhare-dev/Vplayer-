@@ -6,12 +6,6 @@
    3. The phone Back button goes one step back. On the main screen, press twice to exit. */
 (function () {
   'use strict';
-  var Cap = window.Capacitor;
-  if (!Cap || !Cap.registerPlugin) return;
-  var isNative = false;
-  try { isNative = Cap.isNativePlatform(); } catch (e) {}
-  if (!isNative) return;
-
   var doc = document;
   function R() { return doc.documentElement; }
   /* small check strip at the top-left, hides itself after 25 seconds */
@@ -34,6 +28,12 @@
   }
   dbg('engine.js loaded');
   window.addEventListener('error', function (ev) { dbg('JS error: ' + (ev.message || '?')); });
+  var Cap = window.Capacitor;
+  if (!Cap || !Cap.registerPlugin) { dbg('stopped: Capacitor missing (' + !!Cap + ')'); return; }
+  var isNative = false;
+  try { isNative = Cap.isNativePlatform(); } catch (e) {}
+  if (!isNative) { dbg('stopped: not a native app'); return; }
+
   function $(s) { return doc.querySelector(s); }
   function noop() {}
 

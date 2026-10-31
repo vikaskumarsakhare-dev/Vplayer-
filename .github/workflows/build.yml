@@ -575,31 +575,57 @@ jobs:
           }
           EOF
 
-      - name: Dark start screen
+      - name: Start screen with logo
         continue-on-error: true
         run: |
+          python3 -m pip install --quiet pillow
           cat > fix_start.py <<'EOF'
-          import glob, os, shutil
+          import glob, os, re, shutil
           from xml.dom import minidom
+          from PIL import Image, ImageDraw
           res = "android/app/src/main/res"
+          os.makedirs(res + "/drawable-nodpi", exist_ok=True)
+          os.makedirs(res + "/drawable", exist_ok=True)
           os.makedirs(res + "/values", exist_ok=True)
+          S = 432
+          side = 260
+          o = (S - side) // 2
+          img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+          d = ImageDraw.Draw(img)
+          d.rounded_rectangle([o, o, o + side - 1, o + side - 1], radius=int(side * 0.22), fill=(255, 181, 46, 255))
+          d.polygon([(o + side * 0.30, o + side * 0.32), (o + side * 0.70, o + side * 0.32), (o + side * 0.50, o + side * 0.70)], fill=(26, 18, 4, 255))
+          img.save(res + "/drawable-nodpi/vp_splash_logo.png")
           open(res + "/values/vp_splash.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="vp_splash_bg">#0b0e18</color>\n</resources>\n')
+          open(res + "/drawable/vp_splash.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<layer-list xmlns:android="http://schemas.android.com/apk/res/android">\n    <item android:drawable="@color/vp_splash_bg"/>\n    <item>\n        <bitmap android:src="@drawable/vp_splash_logo" android:gravity="center"/>\n    </item>\n</layer-list>\n')
+          pat = re.compile(r'(<style\s+name="(AppTheme\.NoActionBarLaunch|AppTheme\.NoActionBar)"[^>]*>)(.*?)(</style>)', re.S)
+          def fix(m):
+              head, name, body, tail = m.group(1), m.group(2), m.group(3), m.group(4)
+              body = re.sub(r'\s*<item name="android:(background|windowBackground)">[^<]*</item>', '', body)
+              add = '\n        <item name="android:windowBackground">@drawable/vp_splash</item>'
+              if name.endswith("Launch"):
+                  add += '\n        <item name="android:background">@drawable/vp_splash</item>'
+              if "SplashScreen" in head:
+                  body = re.sub(r'\s*<item name="(windowSplashScreenBackground|windowSplashScreenAnimatedIcon)">[^<]*</item>', '', body)
+                  add += '\n        <item name="windowSplashScreenBackground">@color/vp_splash_bg</item>'
+                  add += '\n        <item name="windowSplashScreenAnimatedIcon">@drawable/vp_splash_logo</item>'
+              return head + add + body + tail
           for f in glob.glob(res + "/values*/styles.xml"):
               s = open(f, encoding="utf-8").read()
-              o = s
-              s = s.replace("@drawable/splash", "@color/vp_splash_bg")
-              if "Theme.SplashScreen" in s and "windowSplashScreenBackground" not in s:
-                  s = s.replace('parent="Theme.SplashScreen">', 'parent="Theme.SplashScreen">\n        <item name="windowSplashScreenBackground">@color/vp_splash_bg</item>')
-              if s != o:
+              s2 = pat.sub(fix, s)
+              if s2 != s:
                   bak = "/tmp/" + os.path.basename(os.path.dirname(f)) + "_styles.bak"
                   shutil.copy(f, bak)
-                  open(f, "w", encoding="utf-8").write(s)
+                  open(f, "w", encoding="utf-8").write(s2)
                   try:
                       minidom.parse(f)
                       print("updated", f)
+                      print(s2)
                   except Exception as e:
                       shutil.copy(bak, f)
                       print("reverted", f, e)
+              else:
+                  print("no matching style in", f)
+                  print(s)
           EOF
           python3 fix_start.py
 

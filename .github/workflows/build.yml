@@ -348,6 +348,12 @@ jobs:
                     o.put("tex", tv.isAvailable());
                     o.put("par", box.getParent() == null ? "none" : box.getParent().getClass().getSimpleName());
                   }
+                  try {
+                    getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                    android.graphics.drawable.Drawable d = getBridge().getWebView().getBackground();
+                    o.put("wv", d instanceof android.graphics.drawable.ColorDrawable ? Integer.toHexString(((android.graphics.drawable.ColorDrawable) d).getColor()) : String.valueOf(d));
+                  } catch (Throwable e) {
+                  }
                   notifyListeners("first", o);
                 }
 
@@ -512,6 +518,10 @@ jobs:
                     cover = "cover".equals(fitMode);
                     muted = mute;
                     vol = v;
+                    try {
+                      getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                    } catch (Throwable e) {
+                    }
                     box.setVisibility(View.VISIBLE);
                     getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                     player.setMediaItem(MediaItem.fromUri(Uri.fromFile(new File(path))));
@@ -613,6 +623,10 @@ jobs:
                     player.clearMediaItems();
                   }
                   if (box != null) box.setVisibility(View.GONE);
+                  try {
+                    getBridge().getWebView().setBackgroundColor(Color.parseColor("#0b0e18"));
+                  } catch (Throwable e) {
+                  }
                   getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                   call.resolve();
                 }

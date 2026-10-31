@@ -31,8 +31,12 @@ jobs:
           cp "$HTML" www/index.html
           ENG=$(git log -1 --name-only --diff-filter=AM --format= -- 'engine*.js' | head -1)
           if [ -z "$ENG" ] || [ ! -f "$ENG" ]; then ENG=$(ls -1 engine*.js 2>/dev/null | head -1); fi
+          if [ -n "$ENG" ] && [ -f "$ENG" ] && ! node --check "$ENG"; then
+            echo "engine.js is BROKEN (it looks cut short, $(wc -l < "$ENG") lines). It is skipped, so the app is built without it."
+            ENG=""
+          fi
           if [ -n "$ENG" ] && [ -f "$ENG" ]; then
-            echo "Engine file: $ENG"
+            echo "Engine file: $ENG ($(wc -l < "$ENG") lines)"
             cp "$ENG" www/engine.js
             if [ "$(grep -c '^<script>$' www/index.html)" -ge 2 ]; then
               awk 'BEGIN{n=0} /^<script>$/{n++; if(n==2) print "<script src=\"engine.js\"></script>"} {print}' www/index.html > www/index.tmp

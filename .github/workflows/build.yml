@@ -350,6 +350,7 @@ jobs:
                   }
                   try {
                     getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                    getBridge().getWebView().setBackground(null);
                     android.graphics.drawable.Drawable d = getBridge().getWebView().getBackground();
                     o.put("wv", d instanceof android.graphics.drawable.ColorDrawable ? Integer.toHexString(((android.graphics.drawable.ColorDrawable) d).getColor()) : String.valueOf(d));
                   } catch (Throwable e) {
@@ -520,6 +521,7 @@ jobs:
                     vol = v;
                     try {
                       getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                      getBridge().getWebView().setBackground(null);
                     } catch (Throwable e) {
                     }
                     box.setVisibility(View.VISIBLE);
@@ -625,6 +627,7 @@ jobs:
                   if (box != null) box.setVisibility(View.GONE);
                   try {
                     getBridge().getWebView().setBackgroundColor(Color.parseColor("#0b0e18"));
+                    getBridge().getWebView().setBackground(new android.graphics.drawable.ColorDrawable(Color.parseColor("#0b0e18")));
                   } catch (Throwable e) {
                   }
                   getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);

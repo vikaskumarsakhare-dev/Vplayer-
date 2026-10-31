@@ -232,19 +232,32 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
 
 <section id="reels" hidden>
   <div class="rtrack" id="rtrack"></div>
+
+  <!-- Top-left Back Button (Image jaisa upar-kone me) -->
   <button class="ib rback" type="button" data-act="back" aria-label="Back" id="rBackBtn"></button>
-  <div class="rcap"><div class="g"><div class="t" id="rTitle"></div><button class="s rtime" type="button" data-act="rtime" id="rSub"></button></div></div>
+
+  <!-- Right Side Vertical Buttons (Like, Sound, Delete, More) -->
   <div class="rside">
     <div class="sbw"><button class="sb" type="button" data-act="rlike" aria-label="Like" id="bLike"></button><span id="lCount">0</span></div>
     <button class="sb" type="button" data-act="rsound" aria-label="Sound" id="bSound"></button>
     <button class="sb" type="button" data-act="rhide" aria-label="Hide from app" id="bHide"></button>
     <button class="sb" type="button" data-act="rmore" aria-label="More" id="bMore"></button>
   </div>
+
+  <!-- Bottom Title & Duration Container -->
+  <div class="rcap">
+    <div class="g">
+      <div class="t" id="rTitle"></div>
+      <button class="s rtime" type="button" data-act="rtime" id="rSub"></button>
+    </div>
+  </div>
+
   <div class="rprog" id="rprog"><div class="rbar"><i id="rprogi"></i></div></div>
   <div class="hud" id="hud" hidden></div>
   <div id="rflash"></div>
   <div id="rheart"></div>
 </section>
+
 <div id="dim"></div>
 <div class="sheet" id="sheet" hidden data-act="sheetclose">
   <div class="sbox">

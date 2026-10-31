@@ -128,16 +128,8 @@
   var thumbMem = {}, thumbKeys = [];
   function applyThumb(e, u) { if (e.v.getAttribute('poster') === BLANK) e.v.poster = u; }
   function wantPoster(e) {
+    /* no frame is pulled from the file here, so nothing can slow the video down; the real thumbnail, when the app already has one, is set by the app itself */
     e.v.poster = BLANK;
-    var m = thumbMem[e.path];
-    if (m) { applyThumb(e, m); return; }
-    call('thumb', { path: e.path }).then(function (r) {
-      if (!r || !r.data) return;
-      var u = 'data:image/jpeg;base64,' + r.data;
-      thumbMem[e.path] = u; thumbKeys.push(e.path);
-      if (thumbKeys.length > 60) delete thumbMem[thumbKeys.shift()];
-      applyThumb(e, u);
-    }).catch(noop);
   }
 
   function parsePath(u) {
@@ -268,7 +260,7 @@
       VE.addListener('first', function (s) {
         if (!active || s.id !== active.id) return;
         active.ready = true;
-        if (++nFirst <= 2) dbg('first frame ok; view vis=' + s.vis + ' box=' + s.bw + 'x' + s.bh + ' tv=' + s.tw + 'x' + s.th + ' tex=' + s.tex + ' in ' + s.par);
+        if (++nFirst <= 2) dbg('first frame ok; view vis=' + s.vis + ' box=' + s.bw + 'x' + s.bh + ' tv=' + s.tw + 'x' + s.th + ' tex=' + s.tex + ' in ' + s.par + ' wv=' + s.wv);
         if (!dragging) live(active);
       });
       VE.addListener('error', function (s) {

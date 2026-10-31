@@ -99,22 +99,74 @@ svg{display:block}
 .reel{position:absolute;left:0;width:100%;height:100%;background:#000;overflow:hidden}
 .reel video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
 .reel.tall video{object-fit:cover}
-.rback{position:absolute;top:calc(8px + env(safe-area-inset-top,0px));left:max(8px,env(safe-area-inset-left,0px));z-index:3;background:rgba(0,0,0,.45);color:#fff}
-.rcap{position:absolute;left:0;right:0;bottom:0;z-index:2;padding-top:90px;padding-bottom:calc(18px + env(safe-area-inset-bottom,0px));background:linear-gradient(transparent,rgba(0,0,0,.72));pointer-events:none}
-.rcap .t{font-weight:700;font-size:15px;padding-right:70px;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 1px 6px rgba(0,0,0,.6)}
-.rcap .s{font-size:12.5px;color:rgba(255,255,255,.78);font-variant-numeric:tabular-nums}
-.rside{position:absolute;right:max(10px,env(safe-area-inset-right,0px));bottom:calc(30px + env(safe-area-inset-bottom,0px));z-index:3;display:flex;flex-direction:column;align-items:center;gap:14px}
-.sb{width:46px;height:46px;border-radius:50%;background:rgba(0,0,0,.45);display:grid;place-items:center;color:#fff}
-.sb svg{width:24px;height:24px}
-.sbw{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums;text-shadow:0 1px 4px rgba(0,0,0,.7)}
-.sb.liked{color:#ff3b5c}
-.sb.liked svg{fill:currentColor}
-.sb.arm{width:auto;padding:0 14px;border-radius:999px;background:var(--danger);color:#2a0606;font-weight:700;font-size:13px;white-space:nowrap}
-.rprog{position:absolute;left:0;right:0;bottom:0;height:28px;z-index:3;touch-action:none}
-.rprog .rbar{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.2)}
-.rprog.on .rbar{height:7px}
-.rprog i{display:block;height:100%;width:0;background:var(--accent)}
-.rcap .s.rtime{pointer-events:auto;color:rgba(255,255,255,.78);padding:4px 0}
+/* Top-left Back button ki styling */
+.rback{
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: max(12px, env(safe-area-inset-left, 0px));
+  z-index: 5;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 50%;
+}
+
+/* Right side wale saare buttons ki positioning */
+.rside{
+  position: absolute;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: calc(75px + env(safe-area-inset-bottom, 0px));
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Buttons ka gol (circular) design aur background */
+.sb{
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+
+/* Niche title aur time dikhane wali patti (Caption) */
+.rcap{
+  position: absolute;
+  left: 0;
+  right: 70px; /* Right buttons ke upar text na jaaye isliye margin */
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  z-index: 4;
+  padding-top: 50px;
+  padding-bottom: 10px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  pointer-events: none;
+}
+
+.rcap .t{
+  font-weight: 700;
+  font-size: 15px;
+  color: #fff;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+.rcap .s.rtime{
+  pointer-events: auto;
+  color: rgba(255, 255, 255, 0.8);
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+}
+
 #rheart{position:absolute;left:50%;top:50%;width:96px;height:96px;margin:-48px 0 0 -48px;display:grid;place-items:center;opacity:0;pointer-events:none;z-index:3;color:#ff3b5c}
 #rheart svg{width:96px;height:96px;fill:currentColor}
 #rheart.go{animation:hrt .7s ease-out}

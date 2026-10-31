@@ -1,0 +1,1888 @@
+name: Build V Player APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Project setup
+        run: |
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          mkdir -p www
+          HTML=$(git log -1 --name-only --diff-filter=AM --format= -- 'index*.html' | head -1)
+          if [ -z "$HTML" ] || [ ! -f "$HTML" ]; then HTML=$(ls -1 index*.html | head -1); fi
+          echo "Using $HTML"
+          cp "$HTML" www/index.html
+          ENG=$(git log -1 --name-only --diff-filter=AM --format= -- 'engine*.js' | head -1)
+          if [ -z "$ENG" ] || [ ! -f "$ENG" ]; then ENG=$(ls -1 engine*.js 2>/dev/null | head -1); fi
+          if [ -n "$ENG" ] && [ -f "$ENG" ] && ! node --check "$ENG"; then
+            echo "engine.js is BROKEN (it looks cut short, $(wc -l < "$ENG") lines). It is skipped, so the app is built without it."
+            ENG=""
+          fi
+          if [ -n "$ENG" ] && [ -f "$ENG" ]; then
+            echo "Engine file: $ENG ($(wc -l < "$ENG") lines)"
+            cp "$ENG" www/engine.js
+            if [ "$(grep -c '^<script>$' www/index.html)" -ge 2 ]; then
+              awk 'BEGIN{n=0} /^<script>$/{n++; if(n==2) print "<script src=\"engine.js\"></script>"} {print}' www/index.html > www/index.tmp
+              mv www/index.tmp www/index.html
+              echo "Engine added before the main script"
+            else
+              sed -i 's#<head>#<head><script src="engine.js"></script>#' www/index.html
+              echo "Engine added in head"
+            fi
+          else
+            echo "No engine.js found, building without it"
+          fi
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.vplayer.app",
+            "appName": "V Player",
+            "webDir": "www",
+            "backgroundColor": "#0b0e18"
+          }
+          EOF
+          npx cap add android
+
+      - name: Add phone media reader
+        run: |
+          DIR=android/app/src/main/java/com/vplayer/app
+          mkdir -p $DIR
+          cat > $DIR/MediaScanPlugin.java <<'EOF'
+          package com.vplayer.app;
+
+          import android.content.Context;
+          import android.database.Cursor;
+          import android.media.AudioManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.provider.MediaStore;
+          import android.provider.Settings;
+          import android.view.WindowManager;
+          import com.getcapacitor.JSArray;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.PermissionState;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import com.getcapacitor.annotation.Permission;
+          import com.getcapacitor.annotation.PermissionCallback;
+
+          @CapacitorPlugin(
+            name = "MediaScan",
+            permissions = {
+              @Permission(alias = "media", strings = {"android.permission.READ_MEDIA_VIDEO", "android.permission.READ_MEDIA_AUDIO"}),
+              @Permission(alias = "storage", strings = {"android.permission.READ_EXTERNAL_STORAGE"})
+            }
+          )
+          public class MediaScanPlugin extends Plugin {
+
+            private String alias() {
+              return Build.VERSION.SDK_INT >= 33 ? "media" : "storage";
+            }
+
+            @PluginMethod
+            public void check(PluginCall call) {
+              JSObject r = new JSObject();
+              r.put("granted", getPermissionState(alias()) == PermissionState.GRANTED);
+              call.resolve(r);
+            }
+
+            @PluginMethod
+            public void request(PluginCall call) {
+              if (getPermissionState(alias()) == PermissionState.GRANTED) {
+                check(call);
+                return;
+              }
+              requestPermissionForAlias(alias(), call, "permDone");
+            }
+
+            @PermissionCallback
+            private void permDone(PluginCall call) {
+              check(call);
+            }
+
+            @PluginMethod
+            public void scan(PluginCall call) {
+              JSArray items = new JSArray();
+              try {
+                query(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video", items);
+                query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, "audio", items);
+              } catch (Exception e) {
+                call.reject("Scan failed: " + e.getMessage());
+                return;
+              }
+              JSObject r = new JSObject();
+              r.put("items", items);
+              call.resolve(r);
+            }
+
+            @PluginMethod
+            public void setBrightness(PluginCall call) {
+              final float v = call.getFloat("value", -1f);
+              getActivity().runOnUiThread(() -> {
+                WindowManager.LayoutParams lp = getActivity().getWindow().getAttributes();
+                lp.screenBrightness = v < 0 ? WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE : Math.max(0.02f, Math.min(1f, v));
+                getActivity().getWindow().setAttributes(lp);
+              });
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void getBrightness(PluginCall call) {
+              float b = getActivity().getWindow().getAttributes().screenBrightness;
+              if (b < 0) {
+                try {
+                  b = Settings.System.getInt(getContext().getContentResolver(), Settings.System.SCREEN_BRIGHTNESS) / 255f;
+                } catch (Exception e) {
+                  b = 0.5f;
+                }
+              }
+              JSObject r = new JSObject();
+              r.put("value", (double) b);
+              call.resolve(r);
+            }
+
+            @PluginMethod
+            public void setVolume(PluginCall call) {
+              AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+              int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+              float v = call.getFloat("value", 0.5f);
+              am.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(Math.max(0f, Math.min(1f, v)) * max), 0);
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void getVolume(PluginCall call) {
+              AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+              int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+              int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+              JSObject r = new JSObject();
+              r.put("value", max > 0 ? (double) cur / max : 0.5);
+              call.resolve(r);
+            }
+
+            private void query(Uri uri, String kind, JSArray out) {
+              boolean video = kind.equals("video");
+              String[] cols = video
+                ? new String[]{"_id", "_display_name", "_data", "_size", "date_added", "duration", "width", "height"}
+                : new String[]{"_id", "_display_name", "_data", "_size", "date_added", "duration"};
+              String sel = video ? null : "is_ringtone=0 AND is_notification=0 AND is_alarm=0 AND duration>10000";
+              try (Cursor c = getContext().getContentResolver().query(uri, cols, sel, null, "date_added DESC")) {
+                if (c == null) return;
+                while (c.moveToNext()) {
+                  String path = c.getString(2);
+                  if (path == null) continue;
+                  JSObject o = new JSObject();
+                  o.put("id", kind + c.getLong(0));
+                  o.put("kind", kind);
+                  o.put("name", c.getString(1));
+                  o.put("path", path);
+                  o.put("size", c.getLong(3));
+                  o.put("added", c.getLong(4));
+                  o.put("dur", c.getLong(5) / 1000.0);
+                  if (video) {
+                    o.put("w", c.getInt(6));
+                    o.put("h", c.getInt(7));
+                  }
+                  out.put(o);
+                }
+              }
+            }
+          }
+          EOF
+          cat > $DIR/MainActivity.java <<'EOF'
+          package com.vplayer.app;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              registerPlugin(MediaScanPlugin.class);
+              super.onCreate(savedInstanceState);
+            }
+          }
+          EOF
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#</manifest>#    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n</manifest>#' $M
+
+      - name: Add phone video engine
+        run: |
+          DIR=android/app/src/main/java/com/vplayer/app
+          cat > $DIR/VEnginePlugin.java <<'EOF'
+          package com.vplayer.app;
+
+          import android.content.Context;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.media.MediaMetadataRetriever;
+          import android.util.Base64;
+          import java.io.ByteArrayOutputStream;
+          import android.net.Uri;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.TextureView;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.widget.FrameLayout;
+          import androidx.activity.ComponentActivity;
+          import androidx.activity.OnBackPressedCallback;
+          import androidx.media3.common.AudioAttributes;
+          import androidx.media3.common.C;
+          import androidx.media3.common.MediaItem;
+          import androidx.media3.common.PlaybackException;
+          import androidx.media3.common.PlaybackParameters;
+          import androidx.media3.common.Player;
+          import androidx.media3.common.VideoSize;
+          import androidx.media3.exoplayer.DefaultLoadControl;
+          import androidx.media3.exoplayer.DefaultRenderersFactory;
+          import androidx.media3.exoplayer.ExoPlayer;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import java.io.File;
+
+          @CapacitorPlugin(name = "VEngine")
+          public class VEnginePlugin extends Plugin {
+
+            static VEnginePlugin instance;
+            static boolean backReady = false;
+
+            private ExoPlayer player;
+            private FrameLayout box;
+            private TextureView tv;
+            private int vw = 0;
+            private int vh = 0;
+            private int curId = 0;
+            private boolean cover = false;
+            private float vol = 1f;
+            private boolean muted = false;
+            private final Handler h = new Handler(Looper.getMainLooper());
+            private final Runnable tick = new Runnable() {
+              @Override
+              public void run() {
+                sendState();
+                if (player != null) h.postDelayed(this, 250);
+              }
+            };
+
+            @Override
+            public void load() {
+              instance = this;
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  try {
+                    getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                  } catch (Exception e) {
+                  }
+                }
+              });
+            }
+
+            static void installBack(final ComponentActivity a) {
+              a.getOnBackPressedDispatcher().addCallback(a, new OnBackPressedCallback(true) {
+                @Override
+                public void handleOnBackPressed() {
+                  VEnginePlugin p = instance;
+                  if (p != null && backReady) {
+                    p.notifyListeners("back", new JSObject());
+                  } else {
+                    a.finish();
+                  }
+                }
+              });
+            }
+
+            private void ensure() {
+              if (player != null) return;
+              Context ctx = getContext();
+              DefaultRenderersFactory rf = new DefaultRenderersFactory(ctx).setEnableDecoderFallback(true);
+              DefaultLoadControl lc = new DefaultLoadControl.Builder().setBufferDurationsMs(2000, 10000, 250, 500).build();
+              player = new ExoPlayer.Builder(ctx, rf).setLoadControl(lc).build();
+              player.setRepeatMode(Player.REPEAT_MODE_ONE);
+              player.setAudioAttributes(
+                new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
+                true
+              );
+              player.addListener(new Player.Listener() {
+                @Override
+                public void onVideoSizeChanged(VideoSize size) {
+                  vw = size.width;
+                  vh = size.height;
+                  fit();
+                }
+
+                @Override
+                public void onRenderedFirstFrame() {
+                  JSObject o = new JSObject();
+                  o.put("id", curId);
+                  if (box != null && tv != null) {
+                    o.put("vis", box.getVisibility());
+                    o.put("bw", box.getWidth());
+                    o.put("bh", box.getHeight());
+                    o.put("tw", tv.getWidth());
+                    o.put("th", tv.getHeight());
+                    o.put("tex", tv.isAvailable());
+                    o.put("par", box.getParent() == null ? "none" : box.getParent().getClass().getSimpleName());
+                  }
+                  try {
+                    getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                    getBridge().getWebView().setBackground(null);
+                    android.graphics.drawable.Drawable d = getBridge().getWebView().getBackground();
+                    o.put("wv", d instanceof android.graphics.drawable.ColorDrawable ? Integer.toHexString(((android.graphics.drawable.ColorDrawable) d).getColor()) : String.valueOf(d));
+                  } catch (Throwable e) {
+                  }
+                  notifyListeners("first", o);
+                }
+
+                @Override
+                public void onPlayerError(PlaybackException e) {
+                  JSObject o = new JSObject();
+                  o.put("id", curId);
+                  o.put("msg", e.getErrorCodeName());
+                  notifyListeners("error", o);
+                }
+              });
+              box = new FrameLayout(ctx);
+              box.setBackgroundColor(Color.BLACK);
+              box.setVisibility(View.GONE);
+              tv = new TextureView(ctx);
+              box.addView(tv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+              ViewGroup parent = (ViewGroup) getBridge().getWebView().getParent();
+              parent.addView(box, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+              box.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override
+                public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int orr, int ob) {
+                  fit();
+                }
+              });
+              player.setVideoTextureView(tv);
+            }
+
+            private void fit() {
+              if (box == null || tv == null) return;
+              int bw = box.getWidth();
+              int bh = box.getHeight();
+              if (bw == 0 || bh == 0 || vw == 0 || vh == 0) return;
+              float sx = (float) bw / vw;
+              float sy = (float) bh / vh;
+              float s = cover ? Math.max(sx, sy) : Math.min(sx, sy);
+              tv.setLayoutParams(new FrameLayout.LayoutParams(Math.round(vw * s), Math.round(vh * s), Gravity.CENTER));
+            }
+
+            private void applyVolume() {
+              if (player != null) player.setVolume(muted ? 0f : vol);
+            }
+
+            private void sendState() {
+              if (player == null) return;
+              JSObject o = new JSObject();
+              o.put("id", curId);
+              o.put("pos", player.getCurrentPosition());
+              long d = player.getDuration();
+              o.put("dur", d == C.TIME_UNSET ? -1 : d);
+              o.put("playing", player.isPlaying());
+              o.put("w", vw);
+              o.put("h", vh);
+              notifyListeners("state", o);
+            }
+
+            @PluginMethod
+            public void thumb(final PluginCall call) {
+              final String path = call.getString("path");
+              if (path == null) {
+                call.reject("no path");
+                return;
+              }
+              MediaMetadataRetriever r = new MediaMetadataRetriever();
+              try {
+                r.setDataSource(path);
+                String ds = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+                long dur = ds == null ? 0 : Long.parseLong(ds);
+                long[] tries = new long[]{Math.min(1000L, dur / 10), dur / 5, dur / 3, 0L};
+                Bitmap best = null;
+                float bestL = -1f;
+                for (long t : tries) {
+                  Bitmap b = r.getFrameAtTime(t * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                  if (b == null) continue;
+                  float l = luma(b);
+                  if (l > bestL) {
+                    if (best != null) best.recycle();
+                    best = b;
+                    bestL = l;
+                  } else {
+                    b.recycle();
+                  }
+                  if (bestL > 14f) break;
+                }
+                if (best == null) {
+                  call.reject("no frame");
+                  return;
+                }
+                int w = best.getWidth();
+                int hh = best.getHeight();
+                float s = Math.min(1f, 480f / Math.max(w, hh));
+                Bitmap sm = Bitmap.createScaledBitmap(best, Math.max(1, Math.round(w * s)), Math.max(1, Math.round(hh * s)), true);
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                sm.compress(Bitmap.CompressFormat.JPEG, 72, bos);
+                JSObject o = new JSObject();
+                o.put("data", Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP));
+                call.resolve(o);
+              } catch (Throwable e) {
+                call.reject("thumb failed: " + e);
+              } finally {
+                try {
+                  r.release();
+                } catch (Throwable e) {
+                }
+              }
+            }
+
+            private float luma(Bitmap b) {
+              Bitmap s = Bitmap.createScaledBitmap(b, 16, 16, false);
+              float sum = 0f;
+              for (int y = 0; y < 16; y++) {
+                for (int x = 0; x < 16; x++) {
+                  int p = s.getPixel(x, y);
+                  sum += 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p);
+                }
+              }
+              if (s != b) s.recycle();
+              return sum / 256f;
+            }
+
+            @PluginMethod
+            public void ping(PluginCall call) {
+              JSObject o = new JSObject();
+              o.put("ok", true);
+              o.put("sdk", android.os.Build.VERSION.SDK_INT);
+              call.resolve(o);
+            }
+
+            @PluginMethod
+            public void setBackReady(PluginCall call) {
+              backReady = true;
+              call.resolve();
+            }
+
+            @PluginMethod
+            public void exit(PluginCall call) {
+              call.resolve();
+              getActivity().finish();
+            }
+
+            @PluginMethod
+            public void open(final PluginCall call) {
+              final String path = call.getString("path");
+              if (path == null) {
+                call.reject("no path");
+                return;
+              }
+              final int id = call.getInt("id", 0);
+              final boolean play = call.getBoolean("play", true);
+              final boolean mute = call.getBoolean("muted", false);
+              final double pos = call.getDouble("pos", 0.0);
+              final float rate = call.getFloat("rate", 1f);
+              final float v = call.getFloat("vol", 1f);
+              final String fitMode = call.getString("fit", "contain");
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  try {
+                    ensure();
+                    curId = id;
+                    vw = 0;
+                    vh = 0;
+                    cover = "cover".equals(fitMode);
+                    muted = mute;
+                    vol = v;
+                    try {
+                      getBridge().getWebView().setBackgroundColor(Color.TRANSPARENT);
+                      getBridge().getWebView().setBackground(null);
+                    } catch (Throwable e) {
+                    }
+                    box.setVisibility(View.VISIBLE);
+                    getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    player.setMediaItem(MediaItem.fromUri(Uri.fromFile(new File(path))));
+                    player.prepare();
+                    if (pos > 0) player.seekTo((long) pos);
+                    applyVolume();
+                    player.setPlaybackParameters(new PlaybackParameters(rate));
+                    player.setPlayWhenReady(play);
+                    h.removeCallbacks(tick);
+                    h.post(tick);
+                    call.resolve();
+                  } catch (Throwable e) {
+                    call.reject("open failed: " + e);
+                  }
+                }
+              });
+            }
+
+            @PluginMethod
+            public void play(final PluginCall call) {
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  if (player != null) player.setPlayWhenReady(true);
+                  call.resolve();
+                }
+              });
+            }
+
+            @PluginMethod
+            public void pause(final PluginCall call) {
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  if (player != null) player.setPlayWhenReady(false);
+                  call.resolve();
+                }
+              });
+            }
+
+            @PluginMethod
+            public void seek(final PluginCall call) {
+              final double ms = call.getDouble("ms", 0.0);
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  if (player != null) player.seekTo((long) ms);
+                  call.resolve();
+                }
+              });
+            }
+
+            @PluginMethod
+            public void setRate(final PluginCall call) {
+              final float rate = call.getFloat("rate", 1f);
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  if (player != null) player.setPlaybackParameters(new PlaybackParameters(rate));
+                  call.resolve();
+                }
+              });
+            }
+
+            @PluginMethod
+            public void setMuted(final PluginCall call) {
+              final boolean m = call.getBoolean("muted", false);
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  muted = m;
+                  applyVolume();
+                  call.resolve();
+                }
+              });
+            }
+
+            @PluginMethod
+            public void setVol(final PluginCall call) {
+              final float v = call.getFloat("value", 1f);
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  vol = v;
+                  applyVolume();
+                  call.resolve();
+                }
+              });
+            }
+
+            @PluginMethod
+            public void stop(final PluginCall call) {
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  h.removeCallbacks(tick);
+                  if (player != null) {
+                    player.stop();
+                    player.clearMediaItems();
+                  }
+                  if (box != null) box.setVisibility(View.GONE);
+                  try {
+                    getBridge().getWebView().setBackgroundColor(Color.parseColor("#0b0e18"));
+                    getBridge().getWebView().setBackground(new android.graphics.drawable.ColorDrawable(Color.parseColor("#0b0e18")));
+                  } catch (Throwable e) {
+                  }
+                  getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  call.resolve();
+                }
+              });
+            }
+
+            @Override
+            protected void handleOnPause() {
+              super.handleOnPause();
+              if (player != null) player.setPlayWhenReady(false);
+            }
+
+            @Override
+            protected void handleOnDestroy() {
+              super.handleOnDestroy();
+              h.removeCallbacks(tick);
+              if (player != null) {
+                player.release();
+                player = null;
+              }
+            }
+          }
+          EOF
+          APPG=android/app/build.gradle
+          sed -i '0,/^dependencies {/s//dependencies {\n    implementation "androidx.media3:media3-exoplayer:1.3.1"/' $APPG
+          grep -n "media3" $APPG
+          cat > $DIR/MainActivity.java <<'EOF'
+          package com.vplayer.app;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              registerPlugin(MediaScanPlugin.class);
+              registerPlugin(VEnginePlugin.class);
+              super.onCreate(savedInstanceState);
+              VEnginePlugin.installBack(this);
+            }
+          }
+          EOF
+
+      - name: Add native shorts screen
+        run: |
+          DIR=android/app/src/main/java/com/vplayer/app
+          cat > $DIR/VShortsPlugin.java <<'EOF'
+          package com.vplayer.app;
+
+          import android.animation.Animator;
+          import android.animation.AnimatorListenerAdapter;
+          import android.animation.ValueAnimator;
+          import android.app.Activity;
+          import android.content.Context;
+          import android.content.DialogInterface;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.Paint;
+          import android.graphics.drawable.GradientDrawable;
+          import android.media.AudioManager;
+          import android.net.Uri;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.SystemClock;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.TextureView;
+          import android.view.VelocityTracker;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.Window;
+          import android.view.WindowInsets;
+          import android.view.WindowManager;
+          import android.view.animation.DecelerateInterpolator;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import androidx.activity.OnBackPressedCallback;
+          import androidx.appcompat.app.AlertDialog;
+          import androidx.media3.common.AudioAttributes;
+          import androidx.media3.common.C;
+          import androidx.media3.common.MediaItem;
+          import androidx.media3.common.Player;
+          import androidx.media3.common.VideoSize;
+          import androidx.media3.exoplayer.DefaultLoadControl;
+          import androidx.media3.exoplayer.DefaultRenderersFactory;
+          import androidx.media3.exoplayer.ExoPlayer;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import java.io.File;
+          import java.util.ArrayList;
+          import java.util.List;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          @CapacitorPlugin(name = "VShorts")
+          public class VShortsPlugin extends Plugin {
+
+            private Pager pager;
+            private OnBackPressedCallback backCb;
+            private float origBright = -1f;
+
+            @PluginMethod
+            public void open(final PluginCall call) {
+              JSONArray arr = call.getArray("items");
+              if (arr == null || arr.length() == 0) {
+                call.reject("no items");
+                return;
+              }
+              final List<String> paths = new ArrayList<String>();
+              final List<String> ids = new ArrayList<String>();
+              final List<String> titles = new ArrayList<String>();
+              final List<Integer> likes = new ArrayList<Integer>();
+              for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.optJSONObject(i);
+                if (o == null) continue;
+                String p = o.optString("path", "");
+                if (p.length() == 0) continue;
+                paths.add(p);
+                ids.add(o.optString("id", ""));
+                titles.add(o.optString("title", ""));
+                likes.add(Integer.valueOf(o.optInt("likes", 0)));
+              }
+              if (paths.size() == 0) {
+                call.reject("no paths");
+                return;
+              }
+              Integer st = call.getInt("index", 0);
+              final int start = st == null ? 0 : st.intValue();
+              final String tmode = call.getString("tmode", "down");
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  try {
+                    closeNow();
+                    Activity act = getActivity();
+                    origBright = act.getWindow().getAttributes().screenBrightness;
+                    ViewGroup parent = (ViewGroup) getBridge().getWebView().getParent();
+                    int s = Math.max(0, Math.min(start, paths.size() - 1));
+                    pager = new Pager(act, paths, ids, titles, likes, s, tmode, new Pager.Cb() {
+                      @Override
+                      public void onIndex(int i) {
+                        JSObject o = new JSObject();
+                        o.put("index", i);
+                        notifyListeners("index", o);
+                      }
+
+                      @Override
+                      public void onLike(String id, int count) {
+                        JSObject o = new JSObject();
+                        o.put("id", id);
+                        o.put("count", count);
+                        notifyListeners("like", o);
+                      }
+
+                      @Override
+                      public void onHide(String id) {
+                        JSObject o = new JSObject();
+                        o.put("id", id);
+                        notifyListeners("hide", o);
+                      }
+
+                      @Override
+                      public void onTmode(String m) {
+                        JSObject o = new JSObject();
+                        o.put("mode", m);
+                        notifyListeners("tmode", o);
+                      }
+
+                      @Override
+                      public void onClose() {
+                        closeNow();
+                      }
+
+                      @Override
+                      public float getBright() {
+                        return brightNow();
+                      }
+
+                      @Override
+                      public void setBright(float v) {
+                        brightSet(v);
+                      }
+
+                      @Override
+                      public float getVol() {
+                        return volNow();
+                      }
+
+                      @Override
+                      public void setVol(float v) {
+                        volSet(v);
+                      }
+                    });
+                    parent.addView(pager, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                    pager.requestApplyInsets();
+                    backCb = new OnBackPressedCallback(true) {
+                      @Override
+                      public void handleOnBackPressed() {
+                        closeNow();
+                      }
+                    };
+                    getActivity().getOnBackPressedDispatcher().addCallback(getActivity(), backCb);
+                    call.resolve();
+                  } catch (Throwable t) {
+                    closeNow();
+                    call.reject("open failed: " + t);
+                  }
+                }
+              });
+            }
+
+            @PluginMethod
+            public void close(final PluginCall call) {
+              getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  closeNow();
+                  call.resolve();
+                }
+              });
+            }
+
+            private float brightNow() {
+              try {
+                float b = getActivity().getWindow().getAttributes().screenBrightness;
+                if (b >= 0f) return b;
+                int s = android.provider.Settings.System.getInt(getActivity().getContentResolver(), android.provider.Settings.System.SCREEN_BRIGHTNESS, 128);
+                return s / 255f;
+              } catch (Throwable t) {
+                return 0.5f;
+              }
+            }
+
+            private void brightSet(float v) {
+              try {
+                Window w = getActivity().getWindow();
+                WindowManager.LayoutParams lp = w.getAttributes();
+                lp.screenBrightness = Math.max(0.01f, Math.min(1f, v));
+                w.setAttributes(lp);
+              } catch (Throwable t) {
+              }
+            }
+
+            private float volNow() {
+              try {
+                AudioManager am = (AudioManager) getActivity().getSystemService(Context.AUDIO_SERVICE);
+                int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                return max > 0 ? am.getStreamVolume(AudioManager.STREAM_MUSIC) / (float) max : 0.5f;
+              } catch (Throwable t) {
+                return 0.5f;
+              }
+            }
+
+            private void volSet(float v) {
+              try {
+                AudioManager am = (AudioManager) getActivity().getSystemService(Context.AUDIO_SERVICE);
+                int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(Math.max(0f, Math.min(1f, v)) * max), 0);
+              } catch (Throwable t) {
+              }
+            }
+
+            private void closeNow() {
+              if (backCb != null) {
+                backCb.remove();
+                backCb = null;
+              }
+              if (pager != null) {
+                Pager p = pager;
+                pager = null;
+                int last = p.index();
+                p.release();
+                ViewGroup par = (ViewGroup) p.getParent();
+                if (par != null) par.removeView(p);
+                brightSet(origBright < 0f ? 0.5f : origBright);
+                if (origBright < 0f) {
+                  try {
+                    Window w = getActivity().getWindow();
+                    WindowManager.LayoutParams lp = w.getAttributes();
+                    lp.screenBrightness = -1f;
+                    w.setAttributes(lp);
+                  } catch (Throwable t) {
+                  }
+                }
+                JSObject o = new JSObject();
+                o.put("index", last);
+                notifyListeners("closed", o);
+              }
+            }
+
+            @Override
+            protected void handleOnPause() {
+              super.handleOnPause();
+              if (pager != null) pager.pauseNow();
+            }
+
+            @Override
+            protected void handleOnResume() {
+              super.handleOnResume();
+              if (pager != null) pager.resumeNow();
+            }
+
+            @Override
+            protected void handleOnDestroy() {
+              super.handleOnDestroy();
+              if (pager != null) {
+                pager.release();
+                pager = null;
+              }
+            }
+
+            /* A full screen stack of three pages (the one before, the one on screen, the one after).
+               Every page has its own player, so the neighbours are already loaded and move with the finger.
+               The buttons, title, time and yellow bar stay in place on top. */
+            static class Pager extends FrameLayout {
+
+              interface Cb {
+                void onIndex(int i);
+
+                void onLike(String id, int count);
+
+                void onHide(String id);
+
+                void onTmode(String m);
+
+                void onClose();
+
+                float getBright();
+
+                void setBright(float v);
+
+                float getVol();
+
+                void setVol(float v);
+              }
+
+              private final Activity act;
+              private final List<String> paths;
+              private final List<String> ids;
+              private final List<String> titles;
+              private final List<Integer> likes;
+              private final Cb cb;
+              private final Page[] pg = new Page[3];
+              private final Handler hd = new Handler(Looper.getMainLooper());
+              private final float den;
+              private int idx;
+              private int W = 0;
+              private int H = 0;
+              private int insT = 0;
+              private int insB = 0;
+              private float dy = 0f;
+              private boolean animating = false;
+              private boolean dead = false;
+              private VelocityTracker vt;
+              private ValueAnimator anim;
+
+              /* touch state */
+              private float downX = 0f;
+              private float downY = 0f;
+              private int zone = 0;
+              private int mode = 0;
+              private float gBase = 0f;
+              private long seekBase = 0L;
+              private long seekSpan = 0L;
+              private long seekT = 0L;
+              private long lastTapT = 0L;
+
+              /* viewer state */
+              private boolean liked = false;
+              private int likeBase = 0;
+              private boolean muted = false;
+              private boolean userPaused = false;
+              private boolean seekUser = false;
+              private String tmode;
+
+              /* screen parts */
+              private TextView backBtn;
+              private TextView titleTv;
+              private TextView timeTv;
+              private SeekV seekV;
+              private TextView likeBtn;
+              private TextView likeTv;
+              private TextView soundBtn;
+              private TextView hideBtn;
+              private LinearLayout side;
+              private TextView hud;
+              private TextView flash;
+              private TextView heart;
+              private FrameLayout.LayoutParams lpBack;
+              private FrameLayout.LayoutParams lpTitle;
+              private FrameLayout.LayoutParams lpTime;
+              private FrameLayout.LayoutParams lpSeek;
+              private FrameLayout.LayoutParams lpSide;
+              private FrameLayout.LayoutParams lpHud;
+
+              private final Runnable holdRun = new Runnable() {
+                @Override
+                public void run() {
+                  if (mode == 0 && !dead) {
+                    mode = 5;
+                    pg[1].pl.setPlaybackSpeed(2f);
+                    showHud("2x speed");
+                  }
+                }
+              };
+
+              private final Runnable tapRun = new Runnable() {
+                @Override
+                public void run() {
+                  lastTapT = 0L;
+                  togglePause();
+                }
+              };
+
+              private final Runnable hudRun = new Runnable() {
+                @Override
+                public void run() {
+                  hud.setVisibility(View.GONE);
+                }
+              };
+
+              private final Runnable tickRun = new Runnable() {
+                @Override
+                public void run() {
+                  if (dead) return;
+                  tick();
+                  hd.postDelayed(this, 100);
+                }
+              };
+
+              class Page {
+
+                final FrameLayout root;
+                final TextureView tv;
+                final ExoPlayer pl;
+                int vw = 0;
+                int vh = 0;
+                int loaded = -1;
+
+                Page(Context ctx) {
+                  root = new FrameLayout(ctx);
+                  root.setBackgroundColor(Color.BLACK);
+                  tv = new TextureView(ctx);
+                  root.addView(tv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+                  DefaultRenderersFactory rf = new DefaultRenderersFactory(ctx).setEnableDecoderFallback(true);
+                  DefaultLoadControl lc = new DefaultLoadControl.Builder().setBufferDurationsMs(1500, 8000, 250, 500).build();
+                  pl = new ExoPlayer.Builder(ctx, rf).setLoadControl(lc).build();
+                  pl.setRepeatMode(Player.REPEAT_MODE_ONE);
+                  pl.setAudioAttributes(
+                    new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
+                    true
+                  );
+                  pl.setVideoTextureView(tv);
+                  pl.addListener(new Player.Listener() {
+                    @Override
+                    public void onVideoSizeChanged(VideoSize s) {
+                      float par = s.pixelWidthHeightRatio > 0f ? s.pixelWidthHeightRatio : 1f;
+                      vw = Math.round(s.width * par);
+                      vh = s.height;
+                      fit(Page.this);
+                    }
+                  });
+                }
+              }
+
+              /* the yellow bar at the bottom: drag it to move in the video */
+              class SeekV extends View {
+
+                float frac = 0f;
+                boolean on = false;
+                final Paint pt = new Paint();
+
+                SeekV(Context c) {
+                  super(c);
+                }
+
+                @Override
+                protected void onDraw(Canvas c) {
+                  int w = getWidth();
+                  int h = getHeight();
+                  float bh = on ? dp(7) : dp(3);
+                  pt.setColor(0x33FFFFFF);
+                  c.drawRect(0f, h - bh, (float) w, (float) h, pt);
+                  pt.setColor(0xFFFFB52E);
+                  c.drawRect(0f, h - bh, w * frac, (float) h, pt);
+                }
+
+                @Override
+                public boolean onTouchEvent(MotionEvent e) {
+                  int a = e.getActionMasked();
+                  if (a == MotionEvent.ACTION_DOWN) {
+                    on = true;
+                    seekUser = true;
+                    getParent().requestDisallowInterceptTouchEvent(true);
+                  }
+                  if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) {
+                    float f = getWidth() > 0 ? e.getX() / getWidth() : 0f;
+                    frac = Math.max(0f, Math.min(1f, f));
+                    invalidate();
+                    long d = pg[1].pl.getDuration();
+                    if (d > 0) timeTv.setText(timeText((long) (frac * d), d));
+                    return true;
+                  }
+                  if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                    on = false;
+                    seekUser = false;
+                    invalidate();
+                    long d = pg[1].pl.getDuration();
+                    if (a == MotionEvent.ACTION_UP && d > 0) pg[1].pl.seekTo((long) (frac * d));
+                    return true;
+                  }
+                  return true;
+                }
+              }
+
+              private int dp(float v) {
+                return Math.round(v * den);
+              }
+
+              private FrameLayout.LayoutParams lp(int w, int h, int g) {
+                return new FrameLayout.LayoutParams(w, h, g);
+              }
+
+              private TextView circle(String glyph, float sp) {
+                TextView t = new TextView(act);
+                t.setText(glyph);
+                t.setTextSize(sp);
+                t.setTextColor(Color.WHITE);
+                t.setGravity(Gravity.CENTER);
+                GradientDrawable g = new GradientDrawable();
+                g.setShape(GradientDrawable.OVAL);
+                g.setColor(0x73000000);
+                t.setBackground(g);
+                return t;
+              }
+
+              Pager(Activity act, List<String> paths, List<String> ids, List<String> titles, List<Integer> likes, int start, String tmode, Cb cb) {
+                super(act);
+                this.act = act;
+                this.paths = paths;
+                this.ids = ids;
+                this.titles = titles;
+                this.likes = likes;
+                this.idx = start;
+                this.cb = cb;
+                this.tmode = "up".equals(tmode) ? "up" : "down";
+                this.den = act.getResources().getDisplayMetrics().density;
+                setBackgroundColor(Color.BLACK);
+                for (int i = 0; i < 3; i++) {
+                  pg[i] = new Page(act);
+                  addView(pg[i].root, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                }
+
+                View shade = new View(act);
+                GradientDrawable sg = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[] { 0x00000000, 0xB8000000 });
+                shade.setBackground(sg);
+                addView(shade, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(190), Gravity.BOTTOM));
+
+                titleTv = new TextView(act);
+                titleTv.setTextColor(Color.WHITE);
+                titleTv.setTextSize(15f);
+                titleTv.setMaxLines(2);
+                titleTv.setShadowLayer(6f, 0f, 1f, 0x99000000);
+                titleTv.setTypeface(titleTv.getTypeface(), android.graphics.Typeface.BOLD);
+                lpTitle = lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+                addView(titleTv, lpTitle);
+
+                timeTv = new TextView(act);
+                timeTv.setTextColor(0xC7FFFFFF);
+                timeTv.setTextSize(12.5f);
+                timeTv.setPadding(0, dp(6), dp(20), dp(6));
+                lpTime = lp(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+                addView(timeTv, lpTime);
+                timeTv.setOnClickListener(new View.OnClickListener() {
+                  @Override
+                  public void onClick(View v) {
+                    Pager.this.tmode = "down".equals(Pager.this.tmode) ? "up" : "down";
+                    if (Pager.this.cb != null) Pager.this.cb.onTmode(Pager.this.tmode);
+                    tick();
+                  }
+                });
+
+                seekV = new SeekV(act);
+                lpSeek = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(28), Gravity.BOTTOM);
+                addView(seekV, lpSeek);
+
+                side = new LinearLayout(act);
+                side.setOrientation(LinearLayout.VERTICAL);
+                side.setGravity(Gravity.CENTER_HORIZONTAL);
+                likeBtn = circle("♡", 24f);
+                likeTv = new TextView(act);
+                likeTv.setTextColor(Color.WHITE);
+                likeTv.setTextSize(12.5f);
+                likeTv.setShadowLayer(4f, 0f, 1f, 0xB3000000);
+                likeTv.setGravity(Gravity.CENTER);
+                soundBtn = circle("🔊", 20f);
+                hideBtn = circle("🗑", 20f);
+                side.addView(likeBtn, new LinearLayout.LayoutParams(dp(46), dp(46)));
+                side.addView(likeTv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                LinearLayout.LayoutParams l2 = new LinearLayout.LayoutParams(dp(46), dp(46));
+                l2.topMargin = dp(14);
+                side.addView(soundBtn, l2);
+                LinearLayout.LayoutParams l3 = new LinearLayout.LayoutParams(dp(46), dp(46));
+                l3.topMargin = dp(14);
+                side.addView(hideBtn, l3);
+                lpSide = lp(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
+                addView(side, lpSide);
+
+                backBtn = circle("←", 22f);
+                lpBack = lp(dp(44), dp(44), Gravity.TOP | Gravity.START);
+                addView(backBtn, lpBack);
+
+                hud = new TextView(act);
+                hud.setTextColor(Color.WHITE);
+                hud.setTextSize(14f);
+                hud.setTypeface(hud.getTypeface(), android.graphics.Typeface.BOLD);
+                hud.setPadding(dp(16), dp(8), dp(16), dp(8));
+                GradientDrawable hg = new GradientDrawable();
+                hg.setCornerRadius(dp(20));
+                hg.setColor(0xA6000000);
+                hud.setBackground(hg);
+                hud.setVisibility(View.GONE);
+                lpHud = lp(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                addView(hud, lpHud);
+
+                flash = circle("▶", 28f);
+                flash.setAlpha(0f);
+                addView(flash, lp(dp(76), dp(76), Gravity.CENTER));
+
+                heart = new TextView(act);
+                heart.setText("♥");
+                heart.setTextColor(0xFFFF3B5C);
+                heart.setTextSize(80f);
+                heart.setGravity(Gravity.CENTER);
+                heart.setAlpha(0f);
+                addView(heart, lp(dp(120), dp(120), Gravity.CENTER));
+
+                likeBtn.setOnClickListener(new View.OnClickListener() {
+                  @Override
+                  public void onClick(View v) {
+                    doLike(false);
+                  }
+                });
+                soundBtn.setOnClickListener(new View.OnClickListener() {
+                  @Override
+                  public void onClick(View v) {
+                    toggleMute();
+                  }
+                });
+                hideBtn.setOnClickListener(new View.OnClickListener() {
+                  @Override
+                  public void onClick(View v) {
+                    hideMenu();
+                  }
+                });
+                backBtn.setOnClickListener(new View.OnClickListener() {
+                  @Override
+                  public void onClick(View v) {
+                    if (Pager.this.cb != null) Pager.this.cb.onClose();
+                  }
+                });
+
+                ui();
+                assign(pg[1], idx);
+                pg[1].pl.setPlayWhenReady(true);
+                assign(pg[0], idx - 1);
+                assign(pg[2], idx + 1);
+                arrive();
+                hd.post(tickRun);
+              }
+
+              /* places the buttons, keeping clear of the phone's top and bottom bars */
+              private void ui() {
+                lpBack.setMargins(dp(8), dp(8) + insT, 0, 0);
+                lpHud.setMargins(0, dp(70) + insT, 0, 0);
+                lpSeek.setMargins(0, 0, 0, insB);
+                lpTime.setMargins(dp(14), 0, 0, dp(26) + insB);
+                lpTitle.setMargins(dp(14), 0, dp(76), dp(52) + insB);
+                lpSide.setMargins(0, 0, dp(10), dp(40) + insB);
+                requestLayout();
+              }
+
+              @Override
+              public WindowInsets onApplyWindowInsets(WindowInsets ins) {
+                try {
+                  insT = ins.getSystemWindowInsetTop();
+                  insB = ins.getSystemWindowInsetBottom();
+                  ui();
+                } catch (Throwable t) {
+                }
+                return super.onApplyWindowInsets(ins);
+              }
+
+              int index() {
+                return idx;
+              }
+
+              void pauseNow() {
+                pg[1].pl.setPlayWhenReady(false);
+              }
+
+              void resumeNow() {
+                if (!dead && !userPaused) pg[1].pl.setPlayWhenReady(true);
+              }
+
+              void release() {
+                dead = true;
+                hd.removeCallbacksAndMessages(null);
+                if (anim != null) anim.cancel();
+                for (int i = 0; i < 3; i++) {
+                  try {
+                    pg[i].pl.release();
+                  } catch (Throwable t) {
+                  }
+                }
+              }
+
+              private String fmt(long ms) {
+                long s = Math.max(0L, ms / 1000L);
+                long h = s / 3600L;
+                long m = (s % 3600L) / 60L;
+                long r = s % 60L;
+                if (h > 0) return h + ":" + (m < 10 ? "0" : "") + m + ":" + (r < 10 ? "0" : "") + r;
+                return m + ":" + (r < 10 ? "0" : "") + r;
+              }
+
+              private String timeText(long pos, long dur) {
+                if ("down".equals(tmode)) {
+                  long left = (long) Math.ceil(Math.max(0L, dur - pos) / 1000.0) * 1000L;
+                  return "-" + fmt(left) + " / " + fmt(dur);
+                }
+                return fmt(pos) + " / " + fmt(dur);
+              }
+
+              private void tick() {
+                ExoPlayer p = pg[1].pl;
+                long d = p.getDuration();
+                long pos = p.getCurrentPosition();
+                if (d > 0 && !seekUser && mode != 4) {
+                  seekV.frac = Math.max(0f, Math.min(1f, pos / (float) d));
+                  seekV.invalidate();
+                  timeTv.setText(timeText(pos, d));
+                } else if (d <= 0) {
+                  timeTv.setText("");
+                }
+              }
+
+              /* the page on screen changed: title, like count and the like mark start fresh */
+              private void arrive() {
+                liked = false;
+                userPaused = false;
+                if (idx >= 0 && idx < likes.size()) {
+                  likeBase = likes.get(idx).intValue();
+                  likeTv.setText(String.valueOf(likeBase));
+                  titleTv.setText(titles.get(idx));
+                }
+                likeBtn.setText("♡");
+                likeBtn.setTextColor(Color.WHITE);
+                seekV.frac = 0f;
+                seekV.invalidate();
+                for (int i = 0; i < 3; i++) pg[i].pl.setVolume(muted ? 0f : 1f);
+                if (cb != null) cb.onIndex(idx);
+              }
+
+              private void doLike(boolean viaDouble) {
+                if (idx < 0 || idx >= likes.size()) return;
+                int c = likes.get(idx).intValue();
+                if (!liked) {
+                  liked = true;
+                  c++;
+                  if (viaDouble) heartAnim();
+                } else {
+                  liked = false;
+                  c = Math.max(likeBase, c - 1);
+                }
+                likes.set(idx, Integer.valueOf(c));
+                likeTv.setText(String.valueOf(c));
+                likeBtn.setText(liked ? "♥" : "♡");
+                likeBtn.setTextColor(liked ? 0xFFFF3B5C : Color.WHITE);
+                if (cb != null) cb.onLike(ids.get(idx), c);
+              }
+
+              private void heartAnim() {
+                heart.animate().cancel();
+                heart.setScaleX(0.5f);
+                heart.setScaleY(0.5f);
+                heart.setAlpha(1f);
+                heart.animate().alpha(0f).scaleX(1.3f).scaleY(1.3f).setDuration(700).start();
+              }
+
+              private void flashGlyph(String g) {
+                flash.animate().cancel();
+                flash.setText(g);
+                flash.setAlpha(1f);
+                flash.animate().alpha(0f).setDuration(600).start();
+              }
+
+              private void togglePause() {
+                ExoPlayer p = pg[1].pl;
+                if (p.getPlayWhenReady()) {
+                  userPaused = true;
+                  p.setPlayWhenReady(false);
+                  flashGlyph("❚❚");
+                } else {
+                  userPaused = false;
+                  p.setPlayWhenReady(true);
+                  flashGlyph("▶");
+                }
+              }
+
+              private void toggleMute() {
+                muted = !muted;
+                for (int i = 0; i < 3; i++) pg[i].pl.setVolume(muted ? 0f : 1f);
+                soundBtn.setText(muted ? "🔇" : "🔊");
+              }
+
+              private void showHud(String t) {
+                hd.removeCallbacks(hudRun);
+                hud.setText(t);
+                hud.setVisibility(View.VISIBLE);
+              }
+
+              private void hudSoon() {
+                hd.removeCallbacks(hudRun);
+                hd.postDelayed(hudRun, 700);
+              }
+
+              private void hideMenu() {
+                if (idx < 0 || idx >= ids.size()) return;
+                try {
+                  new AlertDialog.Builder(act)
+                    .setItems(
+                      new CharSequence[] { "Hide from V Player (you can bring it back in Settings)", "Delete from phone" },
+                      new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface d, int which) {
+                          if (which == 0) {
+                            removeCurrent();
+                          } else {
+                            Toast.makeText(act, "Delete from phone comes in a later part. Use Hide for now.", Toast.LENGTH_LONG).show();
+                          }
+                        }
+                      }
+                    )
+                    .show();
+                } catch (Throwable t) {
+                }
+              }
+
+              /* the hidden short goes away and the next one (or the one before, if it was the last) is already ready */
+              private void removeCurrent() {
+                if (dead) return;
+                String id = ids.get(idx);
+                int at = idx;
+                paths.remove(at);
+                ids.remove(at);
+                titles.remove(at);
+                likes.remove(at);
+                for (int i = 0; i < 3; i++) {
+                  if (pg[i].loaded > at) pg[i].loaded--;
+                }
+                pg[1].loaded = -1;
+                pg[1].pl.setPlayWhenReady(false);
+                pg[1].pl.stop();
+                pg[1].pl.clearMediaItems();
+                if (cb != null) cb.onHide(id);
+                if (paths.size() == 0) {
+                  if (cb != null) cb.onClose();
+                  return;
+                }
+                if (at < paths.size()) {
+                  Page t = pg[0];
+                  pg[0] = pg[1];
+                  pg[1] = pg[2];
+                  pg[2] = t;
+                  assign(pg[0], -1);
+                  assign(pg[2], idx + 1);
+                } else {
+                  Page t = pg[2];
+                  pg[2] = pg[1];
+                  pg[1] = pg[0];
+                  pg[0] = t;
+                  idx--;
+                  assign(pg[2], -1);
+                  assign(pg[0], idx - 1);
+                }
+                place(0f);
+                pg[0].pl.setPlayWhenReady(false);
+                pg[2].pl.setPlayWhenReady(false);
+                pg[1].pl.setPlayWhenReady(true);
+                arrive();
+              }
+
+              private void assign(Page p, int index) {
+                if (index < 0 || index >= paths.size()) {
+                  if (p.loaded != -1) {
+                    p.pl.stop();
+                    p.pl.clearMediaItems();
+                  }
+                  p.loaded = -1;
+                  p.vw = 0;
+                  p.vh = 0;
+                  p.pl.setPlayWhenReady(false);
+                  return;
+                }
+                if (p.loaded == index) return;
+                p.loaded = index;
+                p.vw = 0;
+                p.vh = 0;
+                p.pl.setPlaybackSpeed(1f);
+                p.pl.setMediaItem(MediaItem.fromUri(Uri.fromFile(new File(paths.get(index)))));
+                p.pl.prepare();
+                p.pl.setPlayWhenReady(false);
+              }
+
+              private void fit(Page p) {
+                if (W == 0 || H == 0 || p.vw == 0 || p.vh == 0) return;
+                float sx = (float) W / p.vw;
+                float sy = (float) H / p.vh;
+                float s = p.vh > p.vw ? Math.max(sx, sy) : Math.min(sx, sy);
+                p.tv.setLayoutParams(new FrameLayout.LayoutParams(Math.round(p.vw * s), Math.round(p.vh * s), Gravity.CENTER));
+              }
+
+              private void place(float d) {
+                for (int i = 0; i < 3; i++) {
+                  pg[i].root.setTranslationY((i - 1) * H + d);
+                }
+              }
+
+              @Override
+              protected void onSizeChanged(int w, int h, int ow, int oh) {
+                super.onSizeChanged(w, h, ow, oh);
+                W = w;
+                H = h;
+                place(dy);
+                for (int i = 0; i < 3; i++) fit(pg[i]);
+              }
+
+              private float clamp(float v, float a, float b) {
+                return Math.max(a, Math.min(b, v));
+              }
+
+              @Override
+              public boolean onTouchEvent(MotionEvent e) {
+                if (animating || dead) return true;
+                int a = e.getActionMasked();
+                float slop = dp(12);
+                if (a == MotionEvent.ACTION_DOWN) {
+                  downX = e.getRawX();
+                  downY = e.getRawY();
+                  dy = 0f;
+                  mode = 0;
+                  zone = downY < H * 0.40f ? 0 : (downY < H * 0.65f ? 1 : 2);
+                  if (vt != null) vt.recycle();
+                  vt = VelocityTracker.obtain();
+                  vt.addMovement(e);
+                  hd.removeCallbacks(holdRun);
+                  hd.postDelayed(holdRun, 450);
+                  return true;
+                }
+                if (vt == null) return true;
+                if (a == MotionEvent.ACTION_MOVE) {
+                  vt.addMovement(e);
+                  float mx = e.getRawX() - downX;
+                  float my = e.getRawY() - downY;
+                  if (mode == 0) {
+                    if (Math.abs(mx) < slop && Math.abs(my) < slop) return true;
+                    hd.removeCallbacks(holdRun);
+                    if (Math.abs(mx) > Math.abs(my)) {
+                      mode = zone == 0 ? 2 : (zone == 1 ? 3 : 4);
+                      if (mode == 2) gBase = cb.getBright();
+                      if (mode == 3) gBase = cb.getVol();
+                      if (mode == 4) {
+                        long d = pg[1].pl.getDuration();
+                        if (d <= 0) {
+                          mode = 6;
+                        } else {
+                          seekBase = pg[1].pl.getCurrentPosition();
+                          seekSpan = Math.min(d, 30000L);
+                          seekT = seekBase;
+                        }
+                      }
+                    } else {
+                      mode = 1;
+                    }
+                  }
+                  if (mode == 1) {
+                    dy = my;
+                    place(shown(dy));
+                  } else if (mode == 2 || mode == 3) {
+                    float val = clamp(gBase + mx / (W * 0.75f), 0f, 1f);
+                    if (mode == 2) {
+                      cb.setBright(val);
+                      showHud("Brightness " + Math.round(val * 100f) + "%");
+                    } else {
+                      cb.setVol(val);
+                      showHud("Volume " + Math.round(val * 100f) + "%");
+                    }
+                  } else if (mode == 4) {
+                    long d = pg[1].pl.getDuration();
+                    long t = seekBase + (long) (mx / W * seekSpan);
+                    seekT = Math.max(0L, Math.min(d, t));
+                    long df = Math.round((seekT - seekBase) / 1000.0);
+                    showHud((df >= 0 ? "+" : "") + df + "s  (" + fmt(seekT) + ")");
+                  }
+                  return true;
+                }
+                if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                  vt.addMovement(e);
+                  vt.computeCurrentVelocity(1000);
+                  float vy = vt.getYVelocity();
+                  vt.recycle();
+                  vt = null;
+                  hd.removeCallbacks(holdRun);
+                  boolean cancel = a == MotionEvent.ACTION_CANCEL;
+                  if (mode == 5) {
+                    pg[1].pl.setPlaybackSpeed(1f);
+                    hudSoon();
+                  } else if (mode == 1) {
+                    settle(cancel ? 0f : vy);
+                  } else if (mode == 4) {
+                    if (!cancel) pg[1].pl.seekTo(seekT);
+                    hudSoon();
+                  } else if (mode != 0) {
+                    hudSoon();
+                  } else if (!cancel) {
+                    long now = SystemClock.uptimeMillis();
+                    if (lastTapT != 0L && now - lastTapT < 260L) {
+                      hd.removeCallbacks(tapRun);
+                      lastTapT = 0L;
+                      doubleTap(downX, downY);
+                    } else {
+                      lastTapT = now;
+                      hd.postDelayed(tapRun, 230);
+                    }
+                  }
+                  mode = 0;
+                }
+                return true;
+              }
+
+              /* two quick taps: low on the screen = 10 seconds back (left) or forward (right); anywhere else = like */
+              private void doubleTap(float x, float y) {
+                if (y > H * 0.65f) {
+                  ExoPlayer p = pg[1].pl;
+                  long d = p.getDuration();
+                  if (d <= 0) return;
+                  long step = x < W / 2f ? -10000L : 10000L;
+                  long t = Math.max(0L, Math.min(d, p.getCurrentPosition() + step));
+                  p.seekTo(t);
+                  showHud(step < 0 ? "-10s" : "+10s");
+                  hudSoon();
+                } else {
+                  doLike(true);
+                }
+              }
+
+              /* at the first and last video the page only moves a little, like a rubber band */
+              private float shown(float d) {
+                if ((idx == 0 && d > 0f) || (idx == paths.size() - 1 && d < 0f)) return d / 3f;
+                return d;
+              }
+
+              private void settle(float vy) {
+                float d = dy;
+                int dir = 0;
+                if (d < 0f && idx < paths.size() - 1 && (-d > H * 0.18f || vy < -900f)) dir = 1;
+                else if (d > 0f && idx > 0 && (d > H * 0.18f || vy > 900f)) dir = -1;
+                float from = shown(d);
+                float target = dir > 0 ? -H : (dir < 0 ? H : 0f);
+                final int fdir = dir;
+                float frac = Math.abs(target - from) / Math.max(1, H);
+                animating = true;
+                anim = ValueAnimator.ofFloat(from, target);
+                anim.setDuration(Math.max(120, Math.round(240f * frac)));
+                anim.setInterpolator(new DecelerateInterpolator());
+                anim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                  @Override
+                  public void onAnimationUpdate(ValueAnimator va) {
+                    place(((Float) va.getAnimatedValue()).floatValue());
+                  }
+                });
+                anim.addListener(new AnimatorListenerAdapter() {
+                  @Override
+                  public void onAnimationEnd(Animator an) {
+                    animating = false;
+                    if (dead) return;
+                    dy = 0f;
+                    if (fdir != 0) commit(fdir);
+                    else place(0f);
+                  }
+                });
+                anim.start();
+              }
+
+              /* the next (or previous) page is now the one on screen: turn the stack around by one */
+              private void commit(int dir) {
+                Page old = pg[1];
+                old.pl.setPlayWhenReady(false);
+                old.pl.setPlaybackSpeed(1f);
+                old.pl.seekTo(0);
+                if (dir > 0) {
+                  Page t = pg[0];
+                  pg[0] = pg[1];
+                  pg[1] = pg[2];
+                  pg[2] = t;
+                  idx++;
+                  assign(pg[2], idx + 1);
+                } else {
+                  Page t = pg[2];
+                  pg[2] = pg[1];
+                  pg[1] = pg[0];
+                  pg[0] = t;
+                  idx--;
+                  assign(pg[0], idx - 1);
+                }
+                place(0f);
+                pg[0].pl.setPlayWhenReady(false);
+                pg[2].pl.setPlayWhenReady(false);
+                pg[1].pl.setPlayWhenReady(true);
+                arrive();
+              }
+            }
+          }
+          EOF
+          cat > $DIR/MainActivity.java <<'EOF'
+          package com.vplayer.app;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              registerPlugin(MediaScanPlugin.class);
+              registerPlugin(VEnginePlugin.class);
+              registerPlugin(VShortsPlugin.class);
+              super.onCreate(savedInstanceState);
+              VEnginePlugin.installBack(this);
+            }
+          }
+          EOF
+
+      - name: Plain dark start screen
+        continue-on-error: true
+        run: |
+          cat > fix_start.py <<'EOF'
+          import glob, os, re, shutil
+          from xml.dom import minidom
+          res = "android/app/src/main/res"
+          os.makedirs(res + "/drawable", exist_ok=True)
+          os.makedirs(res + "/values", exist_ok=True)
+          open(res + "/values/vp_splash.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="vp_splash_bg">#0b0e18</color>\n</resources>\n')
+          open(res + "/drawable/vp_splash_icon.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">\n    <solid android:color="#00000000"/>\n    <size android:width="48dp" android:height="48dp"/>\n</shape>\n')
+          pat = re.compile(r'(<style\s+name="(AppTheme\.NoActionBarLaunch|AppTheme\.NoActionBar)"[^>]*>)(.*?)(</style>)', re.S)
+          def fix(m):
+              head, name, body, tail = m.group(1), m.group(2), m.group(3), m.group(4)
+              body = re.sub(r'\s*<item name="android:(background|windowBackground)">[^<]*</item>', '', body)
+              add = '\n        <item name="android:windowBackground">@color/vp_splash_bg</item>'
+              if name.endswith("Launch"):
+                  add += '\n        <item name="android:background">@color/vp_splash_bg</item>'
+              if "SplashScreen" in head:
+                  body = re.sub(r'\s*<item name="(windowSplashScreenBackground|windowSplashScreenAnimatedIcon)">[^<]*</item>', '', body)
+                  add += '\n        <item name="windowSplashScreenBackground">@color/vp_splash_bg</item>'
+                  add += '\n        <item name="windowSplashScreenAnimatedIcon">@drawable/vp_splash_icon</item>'
+              return head + add + body + tail
+          for f in glob.glob(res + "/values*/styles.xml"):
+              s = open(f, encoding="utf-8").read()
+              s2 = pat.sub(fix, s)
+              if s2 != s:
+                  bak = "/tmp/" + os.path.basename(os.path.dirname(f)) + "_styles.bak"
+                  shutil.copy(f, bak)
+                  open(f, "w", encoding="utf-8").write(s2)
+                  try:
+                      minidom.parse(f)
+                      print("updated", f)
+                      print(s2)
+                  except Exception as e:
+                      shutil.copy(bak, f)
+                      print("reverted", f, e)
+              else:
+                  print("no matching style in", f)
+          EOF
+          python3 fix_start.py
+
+      - name: Make app icon
+        continue-on-error: true
+        run: |
+          python3 -m pip install --quiet pillow
+          cat > make_icon.py <<'EOF'
+          import os
+          from PIL import Image, ImageDraw
+          res = "android/app/src/main/res"
+          YEL = (255, 181, 46, 255)
+          INK = (26, 18, 4, 255)
+
+          def legacy(size, round_shape):
+              img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+              d = ImageDraw.Draw(img)
+              if round_shape:
+                  d.ellipse([0, 0, size - 1, size - 1], fill=YEL)
+              else:
+                  d.rounded_rectangle([0, 0, size - 1, size - 1], radius=size * 0.22, fill=YEL)
+              d.polygon([(size * 0.30, size * 0.32), (size * 0.70, size * 0.32), (size * 0.50, size * 0.70)], fill=INK)
+              return img
+
+          def foreground(size):
+              img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+              d = ImageDraw.Draw(img)
+              d.polygon([(size * 0.33, size * 0.35), (size * 0.67, size * 0.35), (size * 0.50, size * 0.66)], fill=INK)
+              return img
+
+          for name, small, big in [("mdpi", 48, 108), ("hdpi", 72, 162), ("xhdpi", 96, 216), ("xxhdpi", 144, 324), ("xxxhdpi", 192, 432)]:
+              folder = os.path.join(res, "mipmap-" + name)
+              os.makedirs(folder, exist_ok=True)
+              legacy(small, False).save(os.path.join(folder, "ic_launcher.png"))
+              legacy(small, True).save(os.path.join(folder, "ic_launcher_round.png"))
+              foreground(big).save(os.path.join(folder, "ic_launcher_foreground.png"))
+
+          os.makedirs(os.path.join(res, "mipmap-anydpi-v26"), exist_ok=True)
+          os.makedirs(os.path.join(res, "values"), exist_ok=True)
+          xml = '<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n    <background android:drawable="@color/vp_icon_bg"/>\n    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n</adaptive-icon>\n'
+          for n in ["ic_launcher.xml", "ic_launcher_round.xml"]:
+              open(os.path.join(res, "mipmap-anydpi-v26", n), "w").write(xml)
+          open(os.path.join(res, "values", "vp_colors.xml"), "w").write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="vp_icon_bg">#FFB52E</color>\n</resources>\n')
+          print("icon files written")
+          EOF
+          python3 make_icon.py
+
+      - name: Build APK
+        run: |
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          if ! ./gradlew assembleDebug; then
+            echo "The native shorts screen could not be built. Building without it."
+            rm -f app/src/main/java/com/vplayer/app/VShortsPlugin.java
+            sed -i '/VShortsPlugin/d' app/src/main/java/com/vplayer/app/MainActivity.java
+            if ! ./gradlew assembleDebug; then
+              echo "The phone video engine could not be built. Building without it."
+              rm -f app/src/main/java/com/vplayer/app/VEnginePlugin.java
+              sed -i '/VEnginePlugin/d' app/src/main/java/com/vplayer/app/MainActivity.java
+              sed -i '/media3/d' app/build.gradle
+              ./gradlew assembleDebug
+            fi
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: V-Player-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk

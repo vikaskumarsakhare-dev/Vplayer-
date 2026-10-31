@@ -29,7 +29,7 @@
   dbg('engine.js loaded');
   window.addEventListener('error', function (ev) { dbg('JS error: ' + (ev.message || '?')); });
   var Cap = window.Capacitor;
-  if (!Cap || !Cap.registerPlugin) { dbg('stopped: Capacitor missing (' + !!Cap + ')'); return; }
+  if (!Cap) { dbg('stopped: Capacitor missing'); return; }
   var isNative = false;
   try { isNative = Cap.isNativePlatform(); } catch (e) {}
   if (!isNative) { dbg('stopped: not a native app'); return; }
@@ -48,10 +48,14 @@
   function addStyle() { var t = doc.head || R(); if (t) t.appendChild(st); else doc.addEventListener('DOMContentLoaded', addStyle, { once: true }); }
   addStyle();
 
-  var origReg = Cap.registerPlugin.bind(Cap);
+  /* on this phone the Capacitor object may not have registerPlugin; plugins are then read from Capacitor.Plugins */
+  var origReg = (typeof Cap.registerPlugin === 'function')
+    ? Cap.registerPlugin.bind(Cap)
+    : function (n) { return Cap.Plugins ? Cap.Plugins[n] : undefined; };
   var VE = null;
   try { VE = origReg('VEngine'); } catch (e) { VE = null; }
   var engOK = !!VE;
+  dbg('registerPlugin: ' + (typeof Cap.registerPlugin === 'function' ? 'yes' : 'no, using Plugins'));
   dbg('plugin object: ' + (VE ? 'yes' : 'no'));
 
   function call(name, args) {

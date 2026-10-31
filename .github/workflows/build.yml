@@ -227,7 +227,11 @@ jobs:
           package com.vplayer.app;
 
           import android.content.Context;
+          import android.graphics.Bitmap;
           import android.graphics.Color;
+          import android.media.MediaMetadataRetriever;
+          import android.util.Base64;
+          import java.io.ByteArrayOutputStream;
           import android.net.Uri;
           import android.os.Handler;
           import android.os.Looper;
@@ -331,6 +335,15 @@ jobs:
                 public void onRenderedFirstFrame() {
                   JSObject o = new JSObject();
                   o.put("id", curId);
+                  if (box != null && tv != null) {
+                    o.put("vis", box.getVisibility());
+                    o.put("bw", box.getWidth());
+                    o.put("bh", box.getHeight());
+                    o.put("tw", tv.getWidth());
+                    o.put("th", tv.getHeight());
+                    o.put("tex", tv.isAvailable());
+                    o.put("par", box.getParent() == null ? "none" : box.getParent().getClass().getSimpleName());
+                  }
                   notifyListeners("first", o);
                 }
 
@@ -384,6 +397,70 @@ jobs:
               o.put("w", vw);
               o.put("h", vh);
               notifyListeners("state", o);
+            }
+
+            @PluginMethod
+            public void thumb(final PluginCall call) {
+              final String path = call.getString("path");
+              if (path == null) {
+                call.reject("no path");
+                return;
+              }
+              MediaMetadataRetriever r = new MediaMetadataRetriever();
+              try {
+                r.setDataSource(path);
+                String ds = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+                long dur = ds == null ? 0 : Long.parseLong(ds);
+                long[] tries = new long[]{Math.min(1000L, dur / 10), dur / 5, dur / 3, 0L};
+                Bitmap best = null;
+                float bestL = -1f;
+                for (long t : tries) {
+                  Bitmap b = r.getFrameAtTime(t * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                  if (b == null) continue;
+                  float l = luma(b);
+                  if (l > bestL) {
+                    if (best != null) best.recycle();
+                    best = b;
+                    bestL = l;
+                  } else {
+                    b.recycle();
+                  }
+                  if (bestL > 14f) break;
+                }
+                if (best == null) {
+                  call.reject("no frame");
+                  return;
+                }
+                int w = best.getWidth();
+                int hh = best.getHeight();
+                float s = Math.min(1f, 480f / Math.max(w, hh));
+                Bitmap sm = Bitmap.createScaledBitmap(best, Math.max(1, Math.round(w * s)), Math.max(1, Math.round(hh * s)), true);
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                sm.compress(Bitmap.CompressFormat.JPEG, 72, bos);
+                JSObject o = new JSObject();
+                o.put("data", Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP));
+                call.resolve(o);
+              } catch (Throwable e) {
+                call.reject("thumb failed: " + e);
+              } finally {
+                try {
+                  r.release();
+                } catch (Throwable e) {
+                }
+              }
+            }
+
+            private float luma(Bitmap b) {
+              Bitmap s = Bitmap.createScaledBitmap(b, 16, 16, false);
+              float sum = 0f;
+              for (int y = 0; y < 16; y++) {
+                for (int x = 0; x < 16; x++) {
+                  int p = s.getPixel(x, y);
+                  sum += 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p);
+                }
+              }
+              if (s != b) s.recycle();
+              return sum / 256f;
             }
 
             @PluginMethod
@@ -575,39 +652,28 @@ jobs:
           }
           EOF
 
-      - name: Start screen with logo
+      - name: Plain dark start screen
         continue-on-error: true
         run: |
-          python3 -m pip install --quiet pillow
           cat > fix_start.py <<'EOF'
           import glob, os, re, shutil
           from xml.dom import minidom
-          from PIL import Image, ImageDraw
           res = "android/app/src/main/res"
-          os.makedirs(res + "/drawable-nodpi", exist_ok=True)
           os.makedirs(res + "/drawable", exist_ok=True)
           os.makedirs(res + "/values", exist_ok=True)
-          S = 432
-          side = 260
-          o = (S - side) // 2
-          img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-          d = ImageDraw.Draw(img)
-          d.rounded_rectangle([o, o, o + side - 1, o + side - 1], radius=int(side * 0.22), fill=(255, 181, 46, 255))
-          d.polygon([(o + side * 0.30, o + side * 0.32), (o + side * 0.70, o + side * 0.32), (o + side * 0.50, o + side * 0.70)], fill=(26, 18, 4, 255))
-          img.save(res + "/drawable-nodpi/vp_splash_logo.png")
           open(res + "/values/vp_splash.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="vp_splash_bg">#0b0e18</color>\n</resources>\n')
-          open(res + "/drawable/vp_splash.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<layer-list xmlns:android="http://schemas.android.com/apk/res/android">\n    <item android:drawable="@color/vp_splash_bg"/>\n    <item>\n        <bitmap android:src="@drawable/vp_splash_logo" android:gravity="center"/>\n    </item>\n</layer-list>\n')
+          open(res + "/drawable/vp_splash_icon.xml", "w").write('<?xml version="1.0" encoding="utf-8"?>\n<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">\n    <solid android:color="#00000000"/>\n    <size android:width="48dp" android:height="48dp"/>\n</shape>\n')
           pat = re.compile(r'(<style\s+name="(AppTheme\.NoActionBarLaunch|AppTheme\.NoActionBar)"[^>]*>)(.*?)(</style>)', re.S)
           def fix(m):
               head, name, body, tail = m.group(1), m.group(2), m.group(3), m.group(4)
               body = re.sub(r'\s*<item name="android:(background|windowBackground)">[^<]*</item>', '', body)
-              add = '\n        <item name="android:windowBackground">@drawable/vp_splash</item>'
+              add = '\n        <item name="android:windowBackground">@color/vp_splash_bg</item>'
               if name.endswith("Launch"):
-                  add += '\n        <item name="android:background">@drawable/vp_splash</item>'
+                  add += '\n        <item name="android:background">@color/vp_splash_bg</item>'
               if "SplashScreen" in head:
                   body = re.sub(r'\s*<item name="(windowSplashScreenBackground|windowSplashScreenAnimatedIcon)">[^<]*</item>', '', body)
                   add += '\n        <item name="windowSplashScreenBackground">@color/vp_splash_bg</item>'
-                  add += '\n        <item name="windowSplashScreenAnimatedIcon">@drawable/vp_splash_logo</item>'
+                  add += '\n        <item name="windowSplashScreenAnimatedIcon">@drawable/vp_splash_icon</item>'
               return head + add + body + tail
           for f in glob.glob(res + "/values*/styles.xml"):
               s = open(f, encoding="utf-8").read()
@@ -625,7 +691,6 @@ jobs:
                       print("reverted", f, e)
               else:
                   print("no matching style in", f)
-                  print(s)
           EOF
           python3 fix_start.py
 

@@ -55,6 +55,7 @@
     VL.addListener('action', function (d) {
       if (!d || !d.id) return;
       if (d.act === 'share' && vp().doShare) vp().doShare(d.id);
+      else if (d.act === 'short' && vp().setShort) { changed = true; vp().setShort(d.id, true); }
       else if (d.act === 'delete' && vp().doDelete) {
         Promise.resolve(vp().doDelete(d.id)).then(function (r) {
           if (r === 'cancel') return;
@@ -63,6 +64,14 @@
         });
       }
     });
+    VL.addListener('switched', function (d) {
+      if (!d || !d.id) return;
+      viewDone = false; changed = true;
+      var v = vp();
+      try { if (v.recent && v.item) v.recent(v.item(d.id)); } catch (e) {}
+      try { if (v.watched) v.watched(d.id); } catch (e) {}
+    });
+    VL.addListener('titleOn', function (d) { try { localStorage.setItem('vp-ltitle', d && d.on ? '1' : '0'); } catch (e) {} });
     VL.addListener('error', function () { /* the player already shows a message */ });
     VL.addListener('closed', function (d) {
       if (d && d.id) { saveResume(d.id, d.pos, d.dur); countView(d); }
@@ -93,7 +102,16 @@
     var r = resumeMap()[id], rem = false, folders = [], folder = '';
     try { rem = localStorage.getItem('vp-lrem') === '1'; } catch (e) {}
     try { if (v.folderNames) folders = v.folderNames(); if (v.folderOf) folder = v.folderOf(id); } catch (e) {}
-    Promise.resolve(VL.open({ id: id, path: it.path, title: ttl, resume: r ? r.pos : 0, rem: rem, folders: folders, folder: folder })).catch(function () {
+    var queue = [], rm = resumeMap(), showTitle = true;
+    try { showTitle = localStorage.getItem('vp-ltitle') !== '0'; } catch (e) {}
+    try {
+      var ql = v.queueFor ? v.queueFor(id) : [];
+      for (var q = 0; q < ql.length; q++) {
+        var qi = ql[q];
+        queue.push({ id: qi.id, path: qi.path, title: qi.title, folder: qi.folder || '', resume: rm[qi.id] ? rm[qi.id].pos : 0 });
+      }
+    } catch (e) { queue = []; }
+    Promise.resolve(VL.open({ id: id, path: it.path, title: ttl, resume: r ? r.pos : 0, rem: rem, folders: folders, folder: folder, queue: queue, showTitle: showTitle })).catch(function () {
       bypass = true; try { a.click(); } catch (e) {} bypass = false;
     });
   }, true);

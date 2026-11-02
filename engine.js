@@ -115,6 +115,12 @@
           if (r && r.data) { setThumb(d.id, r.data); if (window.__vp && window.__vp.toast) window.__vp.toast('Thumbnail changed'); }
         }).catch(function () {});
       });
+      VS.addListener('action', function (d) {
+        if (d && d.id && d.act === 'share' && window.__vp && window.__vp.doShare) window.__vp.doShare(d.id);
+      });
+      VS.addListener('playlist', function (d) {
+        if (d && d.id && window.__vp && window.__vp.playlistSet) { changed = true; window.__vp.playlistSet(d.id, d.name || ''); }
+      });
       VS.addListener('index', function (d) { if (d) watched(d.index); });
       VS.addListener('tmode', function (d) { try { localStorage.setItem('vp-tmode', d.mode); } catch (e) {} });
       VS.addListener('closed', function (d) {
@@ -138,16 +144,18 @@
     if (!id || !list) return;
     var meta = {};
     try { meta = JSON.parse(localStorage.getItem('vp-meta') || '{}') || {}; } catch (e) {}
-    var vp = window.__vp, items = [], at = -1;
+    var vp = window.__vp, items = [], at = -1, scope = null;
+    try { if (vp && vp.shortScope) scope = vp.shortScope(); } catch (e) {}
     for (var i = 0; i < list.length; i++) {
       var it = list[i];
       if (!it || !it.path || (meta[it.id] && meta[it.id].hidden)) continue;
       if (isShortItem(it, meta[it.id])) {
+        if (scope && it.id !== id && !scope(it)) continue;
         if (it.id === id) at = items.length;
         var mm = meta[it.id] || {};
         var ttl = (vp && vp.title) ? vp.title(it) : (mm.title || String(it.name || '').replace(/\.[^.]+$/, '').replace(/_+/g, ' '));
         var org = String(it.name || '').replace(/\.[^.]+$/, '').replace(/_+/g, ' ');
-        items.push({ id: it.id, path: it.path, title: ttl, orig: org, likes: (mm.likes || 0) });
+        items.push({ id: it.id, path: it.path, title: ttl, orig: org, likes: (mm.likes || 0), playlist: mm.playlist || '' });
       }
     }
     if (at < 0) return;
@@ -158,7 +166,7 @@
     try { tm = localStorage.getItem('vp-tmode') || 'down'; } catch (e) {}
     try { if (vp && vp.recent && vp.item) vp.recent(vp.item(id)); } catch (e) {}
     changed = false; curItems = items; watched(at);
-    Promise.resolve(VS.open({ items: items, index: at, tmode: tm })).catch(function (err) {
+    Promise.resolve(VS.open({ items: items, index: at, tmode: tm, playlists: (vp && vp.playlistNames) ? vp.playlistNames() : [] })).catch(function (err) {
       dbg('native shorts FAILED: ' + (err && err.message ? err.message : err));
       bypass = true; try { a.click(); } catch (e) {} bypass = false;
     });

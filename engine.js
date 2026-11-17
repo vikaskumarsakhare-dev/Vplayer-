@@ -607,7 +607,7 @@
     if (vis('msheet')) { doc.getElementById('msheet').hidden = true; return; }
     if (vis('modal')) { doc.getElementById('modal').hidden = true; return; }
     if (vis('sheet')) { doc.getElementById('sheet').hidden = true; return; }
-    var L = ['ytmodal', 'slmodal', 'eqsheet', 'pview', 'alarmE', 'alarmP', 'reels', 'player', 'now', 'recent',  'settings'];
+    var L = ['ytmodal', 'slmodal', 'eqsheet', 'pview', 'alarmE', 'alarmP', 'backupP', 'reels', 'player', 'now', 'recent',  'settings'];
     for (var i = 0; i < L.length; i++) if (vis(L[i])) { stepBack(); return; }
     if (vis('srch')) { var b = $('#bSearch'); if (b) b.click(); return; }
     var t = Date.now();
